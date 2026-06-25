@@ -1,0 +1,155 @@
+---
+description: wisdom 공통 정책 — GUI·exe 중심, CLI 미사용, 빌드·자동 빌드. 항상 적용.
+alwaysApply: true
+---
+
+<!-- YouTube API 키: 7_utube/config/youtube_api.json (git 제외, GUI 자동 로드) -->
+
+# wisdom 공통 정책
+
+## CLI 사용 안 함
+
+**사용자는 CLI 프로그램을 사용하지 않는다.** (`python -m …`, 콘솔 전용 exe, 터미널 워크플로)
+
+- 기능·수정·안내·검증은 **GUI(`*_gui.exe`) 또는 `run_*_gui.py`** 기준으로 한다.
+- 응답에 `python -m utube …` 등 **CLI 실행 예시를 기본으로 넣지 않는다** (사용자가 CLI를 명시적으로 요청한 경우만).
+- 에이전트가 기능 확인할 때도 **CLI 대신 GUI·빌드된 exe**를 우선한다.
+- `cli.py`·`__main__.py` 서브커맨드는 레거시로 둘 수 있으나, **새 기능·문서·테스트 안내는 GUI에만** 반영한다.
+- spec·`build.bat`은 **GUI exe**(`*_gui.spec`, `*_gui.exe`)를 기준으로 맞춘다. CLI 전용 exe만 추가·갱신하지 않는다.
+
+## 워크스페이스 루트 (열린 폴더)
+
+모듈 간 기본 경로(`2_1_ttsToVoice/output`, `4_1_video/output` 등)는 **IDE·탐색기에서 연 wisdom 폴더**를 루트로 한다.
+
+- 공통: 저장소 루트 `wisdom_root.py`, GUI 진입 `wisdom_bootstrap.py`
+- `run_*_gui.py` 시작 시 `wisdom_bootstrap.run(__file__)` → `os.chdir(wisdom_root)`
+- override: 환경 변수 `WISDOM_ROOT`
+- PyInstaller spec: `wisdom_root.py`·`wisdom_bootstrap.py`·`wisdom_workspace.py`를 Analysis·`pathex`에 포함
+
+## 작업 폴더 (프로젝트 루트)
+
+wisdom **밖**에서 콘텐츠를 작업할 때, 한 GUI에서 처음 고른 폴더가 **작업 폴더**로 `config/wisdom_workspace.json`에 저장된다.
+
+- 다른 모듈 기본 경로: `{작업폴더}/{모듈명}/output` (예: `…/2_1_ttsToVoice/output`)
+- 폴더 선택 대화상자: 작업 폴더를 `initialdir` 우선
+- 기존 `png2jpg_gui_config.json` 등에 저장된 wisdom 밖 경로도 자동 인식
+
+## Git 접속 (Cursor 전면 금지)
+
+에이전트는 **`git`·`gh` 명령을 Cursor에서 실행하지 않는다** (pull·commit·push·status·diff 등 **모든 Git 이벤트 포함**). 사용자 요청이 있어도 파일 기준 변경 요약·커밋 메시지 초안만 텍스트로 안내하고, Git 작업은 IDE·외부 Git 클라이언트에서 사용자가 직접 한다. (상세: `.cursor/rules/wisdom-git-commit.mdc`)
+
+## 공통 
+
+1. **변경된 프로그램이 있으면** 해당 모듈 `build/`의 **spec·`build.bat`을 수정**하여 반영한다.
+2. **기존 프로그램이 실행 중이면** 빌드 시 **중지**하고 **실행 파일을 다시 생성**한다.
+3. **프로그램(`*.py` 등) 변경 후** 자동 빌드·생략 여부는 아래 **§3 자동 빌드 조건**을 따른다.
+4. **허브 포함 모듈**(`wisdom_hub/pipeline.py`의 `HUB_TABS`, `build/wisdom_hub_gui.spec`의 `_module_dirs`)을 변경했으면 **해당 모듈 exe 빌드에 더해 `wisdom_hub_gui`도 항상** 반영한다 (§3·§5).
+
+## 1. spec·build.bat 반영
+
+대상 모듈의 Python·의존성·진입점·`hiddenimports`·데이터 파일이 바뀌면 **같은 모듈**의 `build/`를 함께 수정한다.
+
+- `build/*.spec` — Analysis 대상, `hiddenimports`, `datas`, exe 이름
+- `build/build.bat` — spec 경로, dist/work 경로, pip requirements (있을 때)
+
+`build.bat`이 없고 `*.spec`만 있는 모듈은 spec만 맞춘다.
+
+## 2. 빌드 전 실행 중 exe 종료
+
+해당 모듈의 `dist/*.exe`가 실행 중이면 PyInstaller가 **접근 거부**로 실패한다. `build.bat` 실행 **전에** 프로세스를 종료한다.
+
+```bat
+taskkill /IM <exe이름>.exe /F 2>nul
+```
+
+예: `7_utube_gui.exe`, `4_1_video_gui.exe`, `elsub_gui.exe`, `wisdom_hub_gui.exe` 등 (모듈별 `build/*.spec`의 `name=` 확인).
+
+## 3. 자동 빌드 조건
+
+작업이 끝나면 아래를 **모두** 만족할 때 `build.bat`(또는 해당 spec으로 PyInstaller)를 **에이전트가 직접 실행**한다. 사용자에게 “빌드할까요?”만 묻고 끝내지 않는다.
+
+### 빌드함 (AND)
+
+- 이번 대화에서 **실행 파일에 영향 주는 변경**을 해당 모듈에 적용했음
+- 대상 모듈에 `build/build.bat` 또는 `build/*.spec`이 있음
+- 사용자가 **「빌드 생략」「빌드 안 함」「소스만」** 등으로 명시하지 않음
+
+### 변경 유형별
+
+| 변경 | 자동 빌드 |
+|------|-----------|
+| `*.py` (패키지·GUI·`run_*_gui.py`) | **함** — 수정 모듈 exe + **§5 허브** |
+| `requirements.txt` / 빌드 의존성 | **함** — 수정 모듈 exe + **§5 허브** |
+| `build/*.spec`, `build.bat`, `hiddenimports` | **함** (spec 반영 후) — 수정 모듈 + **§5 허브** |
+| `wisdom_hub/`·`wisdom_*.py`·`run_wisdom_hub_gui.py` | **함** — `build/build_hub.bat` (**§5**) |
+| `config/*.json` 등 런타임 설정만 | **안 함** (exe 재빌드 불필요) |
+| `md/`, `output/`, 테스트·산출물만 | **안 함** |
+| 허브 미포함 경로만 수정 | **안 함** (해당 경로만, 허브 생략) |
+
+### 빌드 생략 (OR — 하나라도 해당 시 실행 안 함)
+
+- 문서·주석·`.md`만 수정
+- 사용자가 빌드 생략을 요청
+- `build.bat` / spec이 없는 모듈 (소스 실행만 가능)
+- 이번 세션에서 **같은 모듈·같은 spec**으로 이미 빌드 성공했고, 그 이후 해당 모듈 코드 추가 변경 없음 (**§5 허브 대상이면 허브도** 동일 조건으로 이미 빌드됨)
+
+### 실행 순서
+
+1. §2 — `taskkill /IM <exe>.exe /F 2>nul` (모듈 exe + `wisdom_hub_gui.exe`)
+2. `<모듈>\build\build.bat` (없으면 spec에 맞는 PyInstaller 명령)
+3. **§5** — 허브 빌드 대상이면 `build/build_hub.bat`
+4. 실패 시 — exe 종료·spec·로그 점검 후 재시도 1회까지
+
+### 보고
+
+빌드 후 응답에 **산출 exe 경로**를 적는다.
+- 모듈: 예) `7_utube/dist/7_utube_gui.exe`
+- 허브(§5 해당 시 **필수**): `dist/wisdom_hub_gui.exe`
+
+## 4. 모듈 ↔ 빌드 경로 (참고)
+
+| 모듈 | build |
+|------|--------|
+| `1_1_textTo700Text` | `1_1_textTo700Text/build/` |
+| `2_1_ttsToVoice` | `2_1_ttsToVoice/build/build.bat` |
+| `3_2_pngToJpg`, `3_1_pngFileName`, `2_2_srtToImage` | 각 `build/` |
+| `4_1_video` | `4_1_video/build/build.bat` |
+| `4_2_ShortVideo` | `4_2_ShortVideo/build/build.bat` |
+| `6_thumbnail` | `6_thumbnail/build/` |
+| `7_utube` | `7_utube/build/build.bat` |
+| `7_2_utubeEdit` | `7_2_utubeEdit/build/build.bat` |
+| **통합 허브** (탭) | `build/build_hub.bat` → `dist/wisdom_hub_gui.exe` |
+
+## 5. wisdom_hub_gui 연동 (항상 반영)
+
+통합 허브(`dist/wisdom_hub_gui.exe`)는 각 모듈 GUI를 **단일 exe**로 묶는다. 아래에 해당하는 변경이 있으면 **모듈 단독 빌드만으로 끝내지 않고** 허브도 **반드시** 갱신한다.
+
+### 허브 빌드 대상 (OR)
+
+- `HUB_TABS`·`_module_dirs`에 있는 **모듈**의 `*.py`·`requirements.txt`·모듈 `build/*.spec` 변경
+- `wisdom_hub/` (`pipeline.py`, `loaders.py`, `gui_app.py` 등)
+- 루트 공통 스크립트: `wisdom_root.py`, `wisdom_bootstrap.py`, `wisdom_workspace.py`, `wisdom_content_paths.py`, `wisdom_gui_host.py`, `run_wisdom_hub_gui.py`
+- `build/wisdom_hub_gui.spec` 변경
+
+### spec·허브 코드 동기화
+
+모듈 구조가 바뀌면 **모듈 `build/`와 함께** `build/wisdom_hub_gui.spec`·`wisdom_hub/loaders.py`·`wisdom_hub/pipeline.py`를 점검한다.
+
+| 변경 | 허브에서 반영할 곳 |
+|------|-------------------|
+| 신규 서브패키지·`hiddenimports` | `wisdom_hub_gui.spec` `hiddenimports` |
+| 런타임 `datas` 파일 | `wisdom_hub_gui.spec` `datas` |
+| 신규 탭·모듈 | `pipeline.py` `HUB_TABS`, `loaders.py`, spec `_module_dirs`·`_hidden_pkgs` |
+| 모듈 GUI 진입 (`main(container=…)`) | `loaders.py` 분기 |
+
+### 허브 빌드
+
+```bat
+taskkill /IM wisdom_hub_gui.exe /F 2>nul
+build\build_hub.bat
+```
+
+- 모듈 exe를 먼저 빌드한 뒤 허브를 빌드한다.
+- 이번 세션에서 모듈만 빌드했고 이후 **허브 대상 코드 추가 변경이 없으면** 허브 재빌드 1회로 충분하다.
+
+문서화·요구사항은 `4_1_video/md/videoPG.md` 및 각 모듈 `md/*PG.md`를 본다.

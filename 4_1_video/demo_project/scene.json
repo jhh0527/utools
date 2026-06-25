@@ -1,0 +1,34 @@
+{
+  "title": "내 첫 장면 영상",
+  "scenes": [
+    {
+      "id": "scene1",
+      "title": "오프닝",
+      "narration": "여기는 첫 장면 내레이션입니다. TTS용 문장으로 적습니다.",
+      "image_prompt": "저녁 노을 산맥 실사풍 일러스트",
+      "image_file": "images/scene1.png",
+      "audio_file": "audio/scene1.mp3",
+      "subtitle_file": "subtitles/scene1.srt",
+      "image_effect": ""
+    },
+    {
+      "id": "scene2",
+      "title": "두 번째 장면",
+      "narration": "본문 내용입니다. FFmpeg으로 이미지와 음성을 합칩니다.",
+      "image_prompt": "도시 스카이라인 블루아워",
+      "image_file": "images/scene2.png",
+      "audio_file": "audio/scene2.mp3",
+      "subtitle_file": "subtitles/scene2.srt",
+      "image_effect": ""
+    }
+  ],
+  "settings": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "video_codec": "libx264",
+    "audio_codec": "aac",
+    "youtube_faststart": true,
+    "default_image_effect": "none"
+  }
+}

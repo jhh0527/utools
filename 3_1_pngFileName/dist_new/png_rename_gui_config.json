@@ -1,0 +1,412 @@
+{
+  "srt_file": "C:\\util\\유튜브\\양자컴퓨터 상용화 3년\\2_1_ttsToVoice\\output\\all.srt",
+  "png_dir": "C:\\util\\유튜브\\양자컴퓨터 상용화 3년\\3_2_pngToJpg\\input",
+  "preview_pane_width": 580,
+  "manual_overrides": {
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_159.png": {
+      "srt_number": 159,
+      "target_name": "SRT_153.png",
+      "cue_text": "셀룰로오스는 포도당 분자가 길게 연결된",
+      "word_srt_number": 159,
+      "word_cue_text": "셀룰로오스는 포도당 분자가 길게 연결된",
+      "status": "변경 지정: SRT_153.png (저장 대기)",
+      "match_reason": "OCR단어 「포도당분자」 대본내용 포함 · 유사도 330 · 파일명·대본번호 일치 · OCR단어·대본번호 동일"
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_128.png": {
+      "srt_number": 128,
+      "target_name": "SRT_110.png",
+      "cue_text": "우선 우리가 가장 먼저 깨야 할",
+      "word_srt_number": 217,
+      "word_cue_text": "소는 그 미생물의 부산물을 먹는다고",
+      "status": "변경 지정: SRT_110.png (저장 대기)",
+      "match_reason": ""
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_004.png": {
+      "srt_number": 4,
+      "target_name": "SRT_000.png",
+      "cue_text": "여러분, 아프리카 사바나의 풍경을",
+      "word_srt_number": -1,
+      "word_cue_text": "",
+      "status": "변경 지정: SRT_000.png (저장 대기)",
+      "match_reason": ""
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_021.png": {
+      "srt_number": 21,
+      "target_name": "SRT_021.png",
+      "cue_text": "잡아먹는 쪽인 사자가 잡아먹히는 쪽인",
+      "word_srt_number": -1,
+      "word_cue_text": "",
+      "status": "OCR매핑 선택: 21번 (저장 대기)",
+      "match_reason": "수동 저장"
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_027.png": {
+      "srt_number": 27,
+      "target_name": "SRT_021.png",
+      "cue_text": "기린은 또 어떻습니까.",
+      "word_srt_number": -1,
+      "word_cue_text": "",
+      "status": "변경 지정: SRT_021.png (저장 대기)",
+      "match_reason": ""
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_028.png": {
+      "srt_number": 28,
+      "target_name": "SRT_027.png",
+      "cue_text": "5미터가 넘는 키에 2미터에 달하는 긴 목을 들고",
+      "word_srt_number": -1,
+      "word_cue_text": "",
+      "status": "변경 지정: SRT_027.png (저장 대기)",
+      "match_reason": "수동 저장"
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_052.png": {
+      "srt_number": 52,
+      "target_name": "SRT_049.png",
+      "cue_text": "이 패턴은 더욱 극명해집니다.",
+      "word_srt_number": -1,
+      "word_cue_text": "",
+      "status": "변경 지정: SRT_049.png (저장 대기)",
+      "match_reason": "수동 저장"
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_081.png": {
+      "srt_number": 81,
+      "target_name": "SRT_078.png",
+      "cue_text": "무엇을 먹고 사는지 아십니까?",
+      "word_srt_number": 804,
+      "word_cue_text": "주식으로 삼지 않아요.",
+      "status": "변경 지정: SRT_078.png (저장 대기)",
+      "match_reason": ""
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_177.png": {
+      "srt_number": 177,
+      "target_name": "SRT_170.png",
+      "cue_text": "우리 몸은 셀룰로오스를 분해하지 못하니까요.",
+      "word_srt_number": 153,
+      "word_cue_text": "식물의 세포벽은 셀룰로오스,",
+      "status": "변경 지정: SRT_170.png (저장 대기)",
+      "match_reason": "OCR단어 「셀룰로오스」 대본내용 포함 · 유사도 900 · 파일명·대본번호 일치"
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_200.png": {
+      "srt_number": 200,
+      "target_name": "SRT_196.png",
+      "cue_text": "박테리아와 원생생물,",
+      "word_srt_number": 200,
+      "word_cue_text": "박테리아와 원생생물,",
+      "status": "변경 지정: SRT_196.png (저장 대기)",
+      "match_reason": "OCR단어 「(박테리아)」 대본내용 포함 · 유사도 136 · 파일명·대본번호 일치 · OCR단어·대본번호 동일"
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_265.png": {
+      "srt_number": 328,
+      "target_name": "SRT_265.png",
+      "cue_text": "코끼리의 전체 에너지 소비량은",
+      "word_srt_number": 58,
+      "word_cue_text": "30미터를 훌쩍 넘는 아르헨티노사우루스,",
+      "status": "변경 지정: SRT_265.png (저장 대기)",
+      "match_reason": ""
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_275.png": {
+      "srt_number": 360,
+      "target_name": "SRT_275.png",
+      "cue_text": "반대로 큰 몸은 부피에 비해 표면적이 작아서",
+      "word_srt_number": 277,
+      "word_cue_text": "그중 가장 큰 첫째 위인 반추위는",
+      "status": "변경 지정: SRT_275.png (저장 대기)",
+      "match_reason": ""
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_247.png": {
+      "srt_number": 288,
+      "target_name": "SRT_247.png",
+      "cue_text": "자, 이런 거대한 내장을 담을 수 있는 몸이",
+      "word_srt_number": 49,
+      "word_cue_text": "심지어 시간을 거슬러 올라가 보면",
+      "status": "변경 지정: SRT_247.png (저장 대기)",
+      "match_reason": ""
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_352.png": {
+      "srt_number": 480,
+      "target_name": "SRT_352.png",
+      "cue_text": "게다가 큰 몸은 또 다른 이점을 가져다줍니다.",
+      "word_srt_number": 355,
+      "word_cue_text": "체온이 빨리 빠져나가고,",
+      "status": "변경 지정: SRT_352.png (저장 대기)",
+      "match_reason": ""
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_231.png": {
+      "srt_number": 668,
+      "target_name": "SRT_668.png",
+      "cue_text": "미생물 발효를 통해 천천히 분해되었던 거예요.",
+      "word_srt_number": 221,
+      "word_cue_text": "문제는 이 발효 과정이 매우 느리다는 점입니다.",
+      "status": "OCR매핑 선택: 668번 (저장 대기)",
+      "match_reason": "과정·221/231/263번, 발효·221/231/265/614/668/847번, 개의·275번, 풀은·143/146번, 입니다·824번, 소는·217번, 되는·1042번, 합니다·350/497번, 미생물·198/214/217/234/668번, 됩니다·727번, 먹습니다·811번, 발효를·668번, 위로·7번, 이동·490/499/1016번, 에너지를·323/365/638/723번, 통해·526/668번, 소가·211/225번, 영양·381/422/758/811번, 미생물이·214번"
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_305.png": {
+      "srt_number": 389,
+      "target_name": "SRT_305.png",
+      "cue_text": "에너지 수지가 절대 맞지 않아요.",
+      "word_srt_number": 98,
+      "word_cue_text": "거대한 법칙의 결과입니다.",
+      "status": "변경 지정: SRT_305.png (저장 대기)",
+      "match_reason": ""
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_315.png": {
+      "srt_number": 418,
+      "target_name": "SRT_315.png",
+      "cue_text": "더 정확히 말하자면, 큰 몸을 갖게 된 동물만이",
+      "word_srt_number": 247,
+      "word_cue_text": "150에서 200kg의 식물을 먹어치우고,",
+      "status": "변경 지정: SRT_315.png (저장 대기)",
+      "match_reason": ""
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_391.png": {
+      "srt_number": 449,
+      "target_name": "SRT_391.png",
+      "cue_text": "하마는 오히려 아프리카에서 가장 위험한 동물 중",
+      "word_srt_number": 328,
+      "word_cue_text": "코끼리의 전체 에너지 소비량은",
+      "status": "변경 지정: SRT_391.png (저장 대기)",
+      "match_reason": ""
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_546.png": {
+      "srt_number": 540,
+      "target_name": "SRT_546.png",
+      "cue_text": "초식동물에게 전달되고,",
+      "word_srt_number": 505,
+      "word_cue_text": "포식자도 따라서 커지지 않을까요?",
+      "status": "변경 지정: SRT_546.png (저장 대기)",
+      "match_reason": ""
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_632.png": {
+      "srt_number": 601,
+      "target_name": "SRT_632.png",
+      "cue_text": "중생대의 식물은 오늘날보다도",
+      "word_srt_number": 625,
+      "word_cue_text": "몸을 움직이지 않고도 거대한 영역의 식물에",
+      "status": "변경 지정: SRT_632.png (저장 대기)",
+      "match_reason": ""
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_652.png": {
+      "srt_number": 628,
+      "target_name": "SRT_652.png",
+      "cue_text": "접근할 수 있는 효율적인 '수확 도구'였던 거예요.",
+      "word_srt_number": 61,
+      "word_cue_text": "파타고티탄 같은 거대 용각류 공룡들 —",
+      "status": "변경 지정: SRT_652.png (저장 대기)",
+      "match_reason": ""
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_798.png": {
+      "srt_number": 750,
+      "target_name": "SRT_798.png",
+      "cue_text": "소형 자동차 한 대 크기에",
+      "word_srt_number": 792,
+      "word_cue_text": "작거나 중간 크기의 초식동물도 많습니다.",
+      "status": "변경 지정: SRT_798.png (저장 대기)",
+      "match_reason": "OCR단어 「크기」 대본내용 포함 · 유사도 212 · 파일명·대본번호 일치"
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_221.png": {
+      "srt_number": 800,
+      "target_name": "SRT_221.png",
+      "cue_text": "작은 초식동물은 풀처럼 거친 섬유질이 많은 식물을",
+      "word_srt_number": 49,
+      "word_cue_text": "심지어 시간을 거슬러 올라가 보면",
+      "status": "변경 지정: SRT_221.png (저장 대기)",
+      "match_reason": ""
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_824.png": {
+      "srt_number": 779,
+      "target_name": "SRT_824.png",
+      "cue_text": "이런 의문을 가질 겁니다.",
+      "word_srt_number": 824,
+      "word_cue_text": "또한 작은 초식동물들은 보통 '맹장 발효형'입니다.",
+      "status": "변경 지정: SRT_824.png (저장 대기)",
+      "match_reason": ""
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_854.png": {
+      "srt_number": 839,
+      "target_name": "SRT_854.png",
+      "cue_text": "그래서 토끼가 자기 똥을 다시 먹는 거예요.",
+      "word_srt_number": 7,
+      "word_cue_text": "황금빛 초원 위로 어슬렁거리는 사자 무리가 있고,",
+      "status": "변경 지정: SRT_854.png (저장 대기)",
+      "match_reason": ""
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_007.png": {
+      "srt_number": 7,
+      "target_name": "SRT_004.png",
+      "cue_text": "황금빛 초원 위로 어슬렁거리는 사자 무리가 있고,",
+      "word_srt_number": -1,
+      "word_cue_text": "",
+      "status": "변경 지정: SRT_004.png (저장 대기)",
+      "match_reason": ""
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_603.png": {
+      "srt_number": 573,
+      "target_name": "SRT_603.png",
+      "cue_text": "그 시절을 들여다보면",
+      "word_srt_number": 945,
+      "word_cue_text": "거대한 몸을 유지할 식량이 부족해지지요.",
+      "status": "변경 지정: SRT_603.png (저장 대기)",
+      "match_reason": ""
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_078.png": {
+      "srt_number": 78,
+      "target_name": "SRT_078.png",
+      "cue_text": "지구 역사상 가장 큰 동물인 흰긴수염고래가",
+      "word_srt_number": -1,
+      "word_cue_text": "",
+      "status": "저장 대기: SRT_078.png",
+      "match_reason": "—"
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_040.png": {
+      "srt_number": 37,
+      "target_name": "SRT_037.png",
+      "cue_text": "하마, 코뿔소, 들소, 무스, 야크…",
+      "word_srt_number": 67,
+      "word_cue_text": "모두 식물을 먹고 살았습니다.",
+      "status": "저장 대기: SRT_037.png",
+      "match_reason": "한위·689/991번, 다양한·919번, 식물을·67/121/247/398/634/800번"
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_061.png": {
+      "srt_number": 61,
+      "target_name": "SRT_061.png",
+      "cue_text": "파타고티탄 같은 거대 용각류 공룡들 —",
+      "word_srt_number": 61,
+      "word_cue_text": "파타고티탄 같은 거대 용각류 공룡들 —",
+      "status": "OCR매핑 선택: 61번 (저장 대기)",
+      "match_reason": "파타고티탄·61/578번, 파타고티·61/578번, 타고티탄·61/578번, 파타고·61/578번, 타고티·61/578번, 고티탄·61/578번, 파타·61/578번, 타고·61/578번, 고티·61/578번, 티탄·61/578번"
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_096.png": {
+      "srt_number": 96,
+      "target_name": "SRT_096.png",
+      "cue_text": "생리학과 생태학과 물리학이 얽힌",
+      "word_srt_number": 96,
+      "word_cue_text": "생리학과 생태학과 물리학이 얽힌",
+      "status": "OCR매핑 선택: 96번 (저장 대기)",
+      "match_reason": "우리가·128번, 법칙·98/297/305/308/367/755번, 새로운·1039번, 물리학·96번, 생리학·96번, 생태학·96번"
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_198.png": {
+      "srt_number": 198,
+      "target_name": "SRT_198.png",
+      "cue_text": "소화관 안에 살고 있는 미생물에 있습니다.",
+      "word_srt_number": 200,
+      "word_cue_text": "박테리아와 원생생물,",
+      "status": "OCR매핑 선택: 198번 (저장 대기)",
+      "match_reason": "식물·67/121/153/247/398/536번, 먹이·493/642/709/723/919번, 박테리아·200번, 에너지·208/233/236/323/328/333번, 소의·275번, 영양·381/422/758/811번, 발효시켜·203번, 미생물·198/214/217/234/668번, 발효·221/231/265/614/668/847번, 들어·294/1020번, 핵심·684번, 걸러·767번"
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_541.png": {
+      "srt_number": 523,
+      "target_name": "SRT_523.png",
+      "cue_text": "포식자는 자기보다 큰 먹잇감을 사냥할 수 있지만,",
+      "word_srt_number": 545,
+      "word_cue_text": "포식자에게 전달됩니다.",
+      "status": "저장 대기: SRT_523.png",
+      "match_reason": "100·581번, 에너지·208/233/236/323/328/333번, 손실·357번, 단계로·871번, 다음·1042번, 단계·871/1042번, 동물·32/100/146/165/308/385번, 10·536/541/546번, 이동할·483번, 전달됩니다·545번, 식물·67/121/153/247/398/536번, 전달되고·540번, 단위·341/378/1011번, 됩니다·727번, 소비·1011번, 법칙·98/297/305/308/367/755번, 에너지가·233/236번, 흐름·533번, 20·317/323번"
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_810.png": {
+      "srt_number": 839,
+      "target_name": "SRT_839.png",
+      "cue_text": "그래서 토끼가 자기 똥을 다시 먹는 거예요.",
+      "word_srt_number": 461,
+      "word_cue_text": "이것은 진화에서 엄청난 이점입니다.",
+      "status": "저장 대기: SRT_839.png",
+      "match_reason": "연결·162번, 효율적으로·365/414/760/961/987/1004번, 되는·1042번, 과정에서·231번, 풍부한·859번, 토끼는·814번, 합니다·350/497번, 코프·873/887번, 건강한·131번, 됩니다·727번, 미생물에·198번, 이점·480/908번, 음식·372/611/675/798/844/984번, 있습니다·10/130/155/175/198/487번, 맹장·824/830번, 에서·247/250/280/442/581번, 발효·221/231/265/614/668/847번, 번째·260번, 식단·136/598번, 영양·381/422/758/811번, 흡수하·847번"
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_99998.png": {
+      "srt_number": 99998,
+      "target_name": "SRT_99998.png",
+      "cue_text": "오늘 내용을 한마디로 요약하면 이렇습니다.",
+      "word_srt_number": -1,
+      "word_cue_text": "",
+      "status": "즉시 저장 완료: SRT_99998.png",
+      "match_reason": "—"
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_948.png": {
+      "srt_number": 948,
+      "target_name": "SRT_948.png",
+      "cue_text": "매머드, 거대 나무늘보, 글립토돈 같은",
+      "word_srt_number": 352,
+      "word_cue_text": "작은 몸은 표면적이 부피에 비해 크다 보니",
+      "status": "OCR매핑 선택: 948번 (저장 대기)",
+      "match_reason": "변화·940/965/1016번, 살아·699번, 동물의·308번, 오히려·117/449/681번, 것이·984번, 앞에서는·72/444번, 환경·856/940/965/1016번, 거대한·32/40/64/98/265/288번, 몸이·288/375/617/1004/1039/1058번, 다양한·919번, 작은·341/352/385/391/463/554번, 거대·61/72/570/578/948번, 시대·55번, 크다·110/352번, 변화에·940/965/1016번, 느린·263/1007번, 동물들의·40번, 먹이·493/642/709/723/919번"
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_988.png": {
+      "srt_number": 988,
+      "target_name": "SRT_988.png",
+      "cue_text": "수천만 년에 걸쳐 다듬어진 결과입니다.",
+      "word_srt_number": 940,
+      "word_cue_text": "또 큰 동물은 환경 변화에 취약해요.",
+      "status": "즉시 저장 완료: SRT_988.png",
+      "match_reason": "택한·821번, 에너지·208/233/236/323/328/333번, 커지는·884번, 변화에·940/965/1016번"
+    },
+    "C:\\intellij\\wisdom\\3_2_pngToJpg\\input\\SRT_925.png": {
+      "srt_number": 925,
+      "target_name": "SRT_925.png",
+      "cue_text": "선택압을 지속적으로 만들어내는 거예요.",
+      "word_srt_number": -1,
+      "word_cue_text": "",
+      "status": "즉시 저장 완료: SRT_925.png",
+      "match_reason": "—"
+    },
+    "C:\\util\\유튜브\\20260000_고양이가먹으면안되는것\\SRT_049.png": {
+      "srt_number": 49,
+      "target_name": "SRT_049.png",
+      "cue_text": "안 들어가는 데가 없죠?",
+      "word_srt_number": 49,
+      "word_cue_text": "안 들어가는 데가 없죠?",
+      "status": "OCR매핑 선택: 49번 (저장 대기)",
+      "match_reason": "들어가·49번"
+    },
+    "C:\\util\\유튜브\\20260000_고양이가먹으면안되는것\\SRT_173.png": {
+      "srt_number": 173,
+      "target_name": "SRT_173.png",
+      "cue_text": "항상 우유 접시에 코 박고 있죠?",
+      "word_srt_number": 183,
+      "word_cue_text": "대부분의 어른 고양이는 '유당불내증'이에요.",
+      "status": "OCR매핑 선택: 173번 (저장 대기)",
+      "match_reason": "유당이·192번, 우유·161/173/177/178/192/199번, 있어요·62/132/205/303/353/388번, 락타아제·187번, 유당불내증·183번, 단백질·503번, 증상·91번, 유당·192번, 경우·103/253/481/666번, 한국·44/421번, 분해·192번, 10·140/538번"
+    },
+    "C:\\util\\유튜브\\20260000_고양이가먹으면안되는것\\SRT_385.png": {
+      "srt_number": 385,
+      "target_name": "SRT_385.png",
+      "cue_text": "영어로는 'yellow fat disease' 또는",
+      "word_srt_number": 331,
+      "word_cue_text": "비타민 B7, 그러니까 비오틴 흡수를 막아요.",
+      "status": "즉시 저장 완료: SRT_385.png",
+      "match_reason": "염증·396번, 손상·276번, 불포화지방산·393번, 비타민·331/348/350/392번"
+    },
+    "C:\\util\\유튜브\\20260000_고양이가먹으면안되는것\\SRT_427.png": {
+      "srt_number": 427,
+      "target_name": "SRT_427.png",
+      "cue_text": "근데요, 고양이 몸은 우리보다 훨씬 작고요,",
+      "word_srt_number": 4,
+      "word_cue_text": "우리 고양이가 식탁 아래에서",
+      "status": "OCR매핑 선택: 427번 (저장 대기)",
+      "match_reason": "사람·64/119/532/658번, 상대·682번, 능력·430번, 고양이·4/67/116/121/143/148번, 기준·148/506번, 체중·145/498번"
+    },
+    "C:\\util\\유튜브\\20260000_고양이가먹으면안되는것\\SRT_501.png": {
+      "srt_number": 501,
+      "target_name": "SRT_501.png",
+      "cue_text": "고양이 전용 사료를 선택하세요.",
+      "word_srt_number": 393,
+      "word_cue_text": "불포화지방산을 너무 많이 섭취했을 때",
+      "status": "즉시 저장 완료: SRT_501.png",
+      "match_reason": "기준·148/506번, 하고·113/676번, AAFCO·503번, 건강·360/498/605/613/619번, 고양이의·143/440번, 건강한·686번, 영양·506번"
+    },
+    "C:\\util\\유튜브\\20260000_고양이가먹으면안되는것\\SRT_524.png": {
+      "srt_number": 524,
+      "target_name": "SRT_524.png",
+      "cue_text": "고양이 전용 제품으로 주는 것이에요.",
+      "word_srt_number": 529,
+      "word_cue_text": "시중에 안전한 간식이 정말 많아요.",
+      "status": "즉시 저장 완료: SRT_524.png",
+      "match_reason": "하는·253/388/544/565번, 안전한·529번, 간식·520/526/529/535/536/597번"
+    },
+    "C:\\util\\유튜브\\20260000_고양이가먹으면안되는것\\SRT_592.png": {
+      "srt_number": 592,
+      "target_name": "SRT_592.png",
+      "cue_text": "거절하는 것이 가장 큰 사랑이라는 걸 기억하세요.",
+      "word_srt_number": -1,
+      "word_cue_text": "",
+      "status": "즉시 저장 완료: SRT_592.png",
+      "match_reason": "—"
+    }
+  }
+}

@@ -1,0 +1,9 @@
+# PyInstaller 산출물 (build/*.spec, build.bat 등은 추적)
+dist/
+build/work/
+build/scenevid/
+build/scenevid_gui/
+
+# Python 캐시
+__pycache__/
+*.pyc

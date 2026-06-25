@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scenevid"
+version = "0.2.0"
+description = "script.md → scene.json → TTS / PNG / SRT → FFmpeg → final.mp4"
+requires-python = ">=3.10"
+dependencies = [
+  "Pillow>=10.0.0",
+]
+
+[project.scripts]
+scenevid = "scenevid.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
