@@ -1,0 +1,30 @@
+# Python 바이트코드 캐시 (실행 시 자동 재생성)
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 커밋 제외: 이미지·실행·mp3 (로컬·빌드·파이프라인 산출물)
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.bmp
+*.ico
+*.svg
+*.exe
+*.msi
+*.mp3
+
+# wisdom 작업 폴더 (프로젝트별 로컬 경로)
+config/wisdom_workspace.json
+
+# 로컬 FFmpeg 바이너리 (wisdom 폴더 안에만 두도록 권장)
+/tools/ffmpeg/bin/*.exe
+
+
+# GitHub 100MB 제한 — 합성 영상은 로컬만 보관
+4_1_video/output/*.mp4
+
+dist/
+*.pkg

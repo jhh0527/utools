@@ -1,0 +1,3 @@
+output/
+dist/*.exe
+build/work/
