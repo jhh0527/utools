@@ -44,6 +44,7 @@ def main(*, container: tk.Misc | None = None) -> None:
         apply_window_chrome,
         bind_close,
         bind_hub_destroy,
+        bind_path_entry_dnd,
         run_mainloop,
         safe_after,
         safe_messagebox,
@@ -164,15 +165,34 @@ def main(*, container: tk.Misc | None = None) -> None:
         input_entry,
         ttk.Button(frm, text="찾기…", command=lambda: pick_dir(input_var, "입력 이미지 폴더")),
     )
+    bind_path_entry_dnd(
+        input_entry,
+        input_var,
+        mode="dir",
+        on_set=lambda _p: (persist(), refresh_count()),
+    )
 
     output_entry = ttk.Entry(frm, textvariable=output_var)
     add_row("출력 MP4 폴더", output_entry, ttk.Button(frm, text="찾기…", command=lambda: pick_dir(output_var, "출력 MP4 폴더")))
+    bind_path_entry_dnd(
+        output_entry,
+        output_var,
+        mode="dir",
+        on_set=lambda _p: (persist(), refresh_count()),
+    )
 
     wf_entry = ttk.Entry(frm, textvariable=workflow_var)
     add_row(
         "워크플로 JSON",
         wf_entry,
         ttk.Button(frm, text="찾기…", command=pick_workflow),
+    )
+    bind_path_entry_dnd(
+        wf_entry,
+        workflow_var,
+        mode="file",
+        extensions=(".json",),
+        on_set=lambda _p: persist(),
     )
 
     pos_entry = ttk.Entry(frm, textvariable=positive_var)

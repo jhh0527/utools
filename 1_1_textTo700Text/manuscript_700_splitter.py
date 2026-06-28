@@ -167,6 +167,7 @@ def run_gui(*, container: tk.Misc | None = None) -> int:
     from wisdom_gui_host import (
         apply_window_chrome,
         bind_hub_destroy,
+        bind_text_widget_file_dnd,
         run_mainloop,
         safe_after,
         tk_host,
@@ -338,6 +339,14 @@ def run_gui(*, container: tk.Misc | None = None) -> int:
         if not stem_var.get().strip():
             stem_var.set(p.stem)
         update_char_count()
+
+    def _on_manuscript_drop(p: Path, _c: str) -> None:
+        if not stem_var.get().strip():
+            stem_var.set(p.stem)
+        update_char_count()
+
+    bind_text_widget_file_dnd(text, extensions=(".txt", ".md"), on_loaded=_on_manuscript_drop)
+    root.after_idle(lambda: bind_text_widget_file_dnd(search_txt, extensions=(".txt", ".md")))
 
     text.bind("<KeyRelease>", update_char_count)
     text.bind("<<Paste>>", lambda _e: root.after_idle(update_char_count))

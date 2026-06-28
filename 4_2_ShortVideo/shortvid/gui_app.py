@@ -6,6 +6,7 @@ import os
 import threading
 import tkinter as tk
 import traceback
+from collections.abc import Callable
 from pathlib import Path
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
@@ -79,7 +80,13 @@ def _default_font() -> tuple[str, int]:
 
 
 def main(*, container: tk.Misc | None = None) -> None:
-    from wisdom_gui_host import apply_window_chrome, configure_notebook_tabs, run_mainloop, tk_host
+    from wisdom_gui_host import (
+        apply_window_chrome,
+        bind_path_row_dnd,
+        configure_notebook_tabs,
+        run_mainloop,
+        tk_host,
+    )
 
     prepend_local_ffmpeg_bin_to_os_path()
     root, standalone = tk_host(container)
@@ -157,7 +164,16 @@ def main(*, container: tk.Misc | None = None) -> None:
     r = 0
     _compose_entries: dict[str, ttk.Entry] = {}
 
-    def _row_labeled(label: str, var: tk.StringVar, pick_cmd, *, entry_key: str | None = None) -> None:
+    def _row_labeled(
+        label: str,
+        var: tk.StringVar,
+        pick_cmd,
+        *,
+        entry_key: str | None = None,
+        dnd_mode: str = "path",
+        dnd_ext: tuple[str, ...] = (),
+        on_dnd_set: Callable[[str], None] | None = None,
+    ) -> None:
         nonlocal r
         ttk.Label(tab_c, text=label).grid(row=r, column=0, columnspan=3, sticky="w")
         r += 1
@@ -169,6 +185,14 @@ def main(*, container: tk.Misc | None = None) -> None:
         if entry_key:
             _compose_entries[entry_key] = ent
         ttk.Button(fr, text="찾기…", command=pick_cmd).grid(row=0, column=1)
+        bind_path_row_dnd(
+            ent,
+            fr,
+            var,
+            mode=dnd_mode,  # type: ignore[arg-type]
+            extensions=dnd_ext,
+            on_set=on_dnd_set,
+        )
         r += 1
 
     def pick_audio() -> None:
@@ -241,6 +265,14 @@ def main(*, container: tk.Misc | None = None) -> None:
     audio_ent.grid(row=0, column=1, sticky="ew", padx=(0, 6))
     _compose_entries["audio"] = audio_ent
     ttk.Button(row_audio, text="찾기…", command=pick_audio).grid(row=0, column=2)
+    bind_path_row_dnd(
+        audio_ent,
+        row_audio,
+        audio_var,
+        mode="file",
+        extensions=(".mp3", ".wav", ".m4a"),
+        on_set=lambda _p: timeline_refresh(silent=True),
+    )
     r += 1
 
     def _sync_audio_row() -> None:
@@ -248,9 +280,23 @@ def main(*, container: tk.Misc | None = None) -> None:
         audio_ent.configure(state=st)
 
     _sync_audio_row()
-    _row_labeled("자막 SRT", srt_var, pick_srt)
-    _row_labeled("이미지·영상 폴더", images_var, pick_images_dir, entry_key="images")
-    _row_labeled("출력 MP4", out_var, pick_out)
+    _row_labeled(
+        "자막 SRT",
+        srt_var,
+        pick_srt,
+        dnd_mode="file",
+        dnd_ext=(".srt",),
+        on_dnd_set=lambda _p: timeline_refresh(silent=True),
+    )
+    _row_labeled(
+        "이미지·영상 폴더",
+        images_var,
+        pick_images_dir,
+        entry_key="images",
+        dnd_mode="dir",
+        on_dnd_set=lambda _p: timeline_refresh(silent=True),
+    )
+    _row_labeled("출력 MP4", out_var, pick_out, dnd_mode="file", dnd_ext=(".mp4",))
     _outro_hint = (
         "엔딩 메시지 (비우면 자막 없음)"
         if not DEFAULT_OUTRO_TEXT.strip()
@@ -988,8 +1034,17 @@ def main(*, container: tk.Misc | None = None) -> None:
             if tl_state.get("ready"):
                 timeline_refresh(silent=True)
 
-    ttk.Entry(row_fx_file, textvariable=effects_file_var).grid(row=0, column=1, sticky="ew", padx=(0, 6))
+    fx_ent = ttk.Entry(row_fx_file, textvariable=effects_file_var)
+    fx_ent.grid(row=0, column=1, sticky="ew", padx=(0, 6))
     ttk.Button(row_fx_file, text="찾기…", command=pick_eff_file).grid(row=0, column=2)
+    bind_path_row_dnd(
+        fx_ent,
+        row_fx_file,
+        effects_file_var,
+        mode="file",
+        extensions=(".json",),
+        on_set=lambda _p: timeline_refresh(silent=True) if tl_state.get("ready") else None,
+    )
 
     row_opt = ttk.Frame(tab_c)
     row_opt.grid(row=r, column=0, columnspan=3, sticky="w", pady=(4, 8))

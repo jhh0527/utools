@@ -27,7 +27,7 @@ def load_gui_settings() -> dict[str, str]:
     if not isinstance(data, dict):
         return {}
     out: dict[str, str] = {}
-    for key in ("mp3_path", "original_path", "whisper_model"):
+    for key in ("mp3_path", "original_path", "whisper_model", "whisper_language"):
         v = data.get(key)
         if isinstance(v, str) and v.strip():
             out[key] = v.strip()
@@ -39,6 +39,7 @@ def save_gui_settings(
     mp3_path: str = "",
     original_path: str = "",
     whisper_model: str = "",
+    whisper_language: str = "",
 ) -> None:
     for p in (mp3_path, original_path):
         if p:
@@ -57,4 +58,6 @@ def save_gui_settings(
         data["original_path"] = original_path.strip()
     if whisper_model.strip():
         data["whisper_model"] = whisper_model.strip()
+    if whisper_language.strip():
+        data["whisper_language"] = whisper_language.strip()
     cfg.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

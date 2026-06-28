@@ -284,7 +284,7 @@ def render_thumbnail_layers(
 
 
 def main(*, container: tk.Misc | None = None) -> None:
-    from wisdom_gui_host import apply_window_chrome, run_mainloop, tk_host
+    from wisdom_gui_host import apply_window_chrome, bind_path_entry_dnd, run_mainloop, tk_host
 
     root, standalone = tk_host(container)
     apply_window_chrome(
@@ -738,12 +738,27 @@ def main(*, container: tk.Misc | None = None) -> None:
 
     r = 0
     ttk.Label(root, text="원본 이미지").grid(row=r, column=0, sticky="w", padx=8, pady=(8, 2))
-    ttk.Entry(root, textvariable=src_image, width=48).grid(row=r, column=1, sticky="ew", padx=(0, 6))
+    src_ent = ttk.Entry(root, textvariable=src_image, width=48)
+    src_ent.grid(row=r, column=1, sticky="ew", padx=(0, 6))
     ttk.Button(root, text="찾기…", command=pick_src).grid(row=r, column=2, padx=(0, 8))
+    def _touch_workspace(p: str) -> None:
+        from wisdom_workspace import touch_workspace_from_path
+
+        touch_workspace_from_path(p)
+
+    bind_path_entry_dnd(
+        src_ent,
+        src_image,
+        mode="file",
+        extensions=(".png", ".jpg", ".jpeg", ".webp", ".bmp"),
+        on_set=_touch_workspace,
+    )
     r += 1
     ttk.Label(root, text="저장 폴더").grid(row=r, column=0, sticky="w", padx=8, pady=2)
-    ttk.Entry(root, textvariable=out_dir, width=48).grid(row=r, column=1, sticky="ew", padx=(0, 6))
+    out_ent = ttk.Entry(root, textvariable=out_dir, width=48)
+    out_ent.grid(row=r, column=1, sticky="ew", padx=(0, 6))
     ttk.Button(root, text="찾기…", command=pick_out).grid(row=r, column=2, padx=(0, 8))
+    bind_path_entry_dnd(out_ent, out_dir, mode="dir", on_set=_touch_workspace)
     r += 1
     sz = ttk.Frame(root)
     sz.grid(row=r, column=0, columnspan=3, sticky="w", padx=8, pady=6)

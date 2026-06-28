@@ -11,8 +11,11 @@ __pycache__/
 *.webp
 *.bmp
 *.ico
+*.tif
+*.tiff
 *.svg
 *.exe
+*.dll
 *.msi
 *.mp3
 
@@ -21,8 +24,7 @@ config/wisdom_workspace.json
 
 # 로컬 FFmpeg 바이너리 (wisdom 폴더 안에만 두도록 권장)
 /tools/ffmpeg/bin/*.exe
-
-
+/tools/ffmpeg/bin/*.dll
 # GitHub 100MB 제한 — 합성 영상은 로컬만 보관
 4_1_video/output/*.mp4
 

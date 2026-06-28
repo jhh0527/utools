@@ -73,6 +73,7 @@ def main(*, container: tk.Misc | None = None) -> None:
         apply_window_chrome,
         bind_close,
         bind_hub_destroy,
+        bind_path_row_dnd,
         configure_notebook_tabs,
         run_mainloop,
         safe_after,
@@ -178,8 +179,14 @@ def main(*, container: tk.Misc | None = None) -> None:
                 on_paths_changed()
 
         ttk.Button(rf, text="찾아보기…", command=pick).grid(row=0, column=1)
-
-    _path_row("SRT 대본", srt_var, 0, is_dir=False)
+        bind_path_row_dnd(
+            ent,
+            rf,
+            var,
+            mode="dir" if is_dir else "file",
+            extensions=() if is_dir else (".srt",),
+            on_set=lambda _p: on_paths_changed(),
+        )
     _path_row("PNG 저장 폴더", png_var, 2, is_dir=True)
 
     guide_row = ttk.Frame(frm)

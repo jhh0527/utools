@@ -1,0 +1,6 @@
+{
+  "pexels_api_key": "tziUULDQCBXErONyqlLQA45LF069m9XnljvOuuTPTL9kauJ4n0SSCSTF",
+  "pixabay_api_key": "56468616-7309f8cf3fc95e0c70f71bb22",
+  "coverr_api_key": "076fadd881d33b168d88728ef95ec6a3",
+  "_comment": "Mixkit은 API 키 없이 검색됩니다. Pexels·Pixabay·Coverr 키를 넣으면 더 많은 관련 영상을 찾습니다."
+}

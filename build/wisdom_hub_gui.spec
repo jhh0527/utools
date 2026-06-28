@@ -19,7 +19,7 @@ _module_dirs = (
     "4_2_ShortVideo",
     "6_thumbnail",
     "7_utube",
-    "7_2_utubeEdit",
+    "7_3_mp4Search",
     "9_mdFile",
 )
 _pathex = [wisdom_repo] + [
@@ -40,6 +40,10 @@ _wisdom_scripts = [
     os.path.join(wisdom_repo, "1_1_textTo700Text", "genspark_chat.py"),
 ]
 _pw_datas, _pw_binaries, _pw_hidden = collect_all("playwright")
+_fw_datas, _fw_binaries, _fw_hidden = collect_all("faster_whisper")
+_ct2_datas, _ct2_binaries, _ct2_hidden = collect_all("ctranslate2")
+_av_datas, _av_binaries, _av_hidden = collect_all("av")
+_ort_datas, _ort_binaries, _ort_hidden = collect_all("onnxruntime")
 
 _example = os.path.join(wisdom_repo, "2_1_ttsToVoice", "elsub_config.example.json")
 _image_guide = os.path.join(wisdom_repo, "2_2_srtToImage", "md", "image.md.txt")
@@ -59,7 +63,7 @@ _hidden_pkgs = (
     "scenevid",
     "shortvid",
     "utube",
-    "utube_edit",
+    "mp4_search",
     "thumbnail_gui",
     "md_file",
     "wisdom_hub",
@@ -77,6 +81,7 @@ hiddenimports: list[str] = [
     "wisdom_workspace",
     "wisdom_content_paths",
     "wisdom_gui_host",
+    "windnd",
     "manuscript_700_splitter",
     "genspark_chat",
     "browser_cookie3",
@@ -84,6 +89,10 @@ hiddenimports: list[str] = [
     "playwright.async_api",
     "faster_whisper",
     *_pw_hidden,
+    *_fw_hidden,
+    *_ct2_hidden,
+    *_av_hidden,
+    *_ort_hidden,
     "PIL",
     "PIL.Image",
     "PIL.ImageDraw",
@@ -98,8 +107,8 @@ hiddenimports += collect_submodules("yt_dlp")
 a = Analysis(
     [os.path.join(wisdom_repo, "run_wisdom_hub_gui.py"), *_wisdom_scripts],
     pathex=_pathex,
-    binaries=_pw_binaries,
-    datas=datas + _pw_datas,
+    binaries=_pw_binaries + _fw_binaries + _ct2_binaries + _av_binaries + _ort_binaries,
+    datas=datas + _pw_datas + _fw_datas + _ct2_datas + _av_datas + _ort_datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

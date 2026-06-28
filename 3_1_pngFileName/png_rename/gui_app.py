@@ -75,6 +75,8 @@ _THUMB_SIZE_MAX = 1200
 _VIEWER_SCREEN_RATIO = 0.92
 _SRT_NUM_IN_NAME = re.compile(r"(?:^|[^0-9])srt[-_ ]?0*(\d+)(?:[^0-9]|$)", re.IGNORECASE)
 _OCR_MATCH_BG = "#fff59d"
+_OCR_TYPO_FG = "#c62828"
+_OCR_EMPTY_MSG = "(인식된 단어 없음 — 이미지에 글자가 없거나 OCR 인식 실패)"
 _SKIP_NO_SOURCE = "__skip_no_source__"
 
 
@@ -114,6 +116,56 @@ def _ocr_token_matches_cue(word: str, cue_text: str) -> bool:
     return False
 
 
+def _ocr_typo_tokens(ocr_preview: str, cue_text: str) -> set[str]:
+    """대본과 일치하지 않는 OCR 단어(이미지 오타)."""
+    tokens = _ocr_preview_tokens(ocr_preview)
+    if not tokens or not (cue_text or "").strip():
+        return set()
+    matched_set: set[str] = set()
+    _, matched_list = ocr_words_in_cue_text(ocr_preview, cue_text or "")
+    for m in matched_list:
+        matched_set.add(m.strip())
+    return {
+        word
+        for word in tokens
+        if word not in matched_set and not _ocr_token_matches_cue(word, cue_text)
+    }
+
+
+def _row_has_ocr_typo(row: MatchPreview) -> bool:
+    return bool(_ocr_typo_tokens(row.ocr_preview, row.cue_text))
+
+
+def _configure_ocr_text_tags(txt: tk.Text) -> None:
+    txt.tag_configure("match", background=_OCR_MATCH_BG)
+    txt.tag_configure("typo", foreground=_OCR_TYPO_FG)
+    txt.tag_configure("empty", foreground="#888888")
+    txt.tag_configure("sep", foreground="#1565c0")
+
+
+def _fill_ocr_text_widget(txt: tk.Text, ocr_preview: str, cue_text: str) -> None:
+    txt.config(state=tk.NORMAL)
+    txt.delete("1.0", tk.END)
+    tokens = _ocr_preview_tokens(ocr_preview)
+    if not tokens:
+        txt.insert(tk.END, _OCR_EMPTY_MSG, "empty")
+    else:
+        matched_set: set[str] = set()
+        _, matched_list = ocr_words_in_cue_text(ocr_preview, cue_text or "")
+        for m in matched_list:
+            matched_set.add(m.strip())
+        for i, word in enumerate(tokens):
+            if i > 0:
+                txt.insert(tk.END, ", ", "sep")
+            tag = (
+                "match"
+                if word in matched_set or _ocr_token_matches_cue(word, cue_text)
+                else "typo"
+            )
+            txt.insert(tk.END, word, tag)
+    txt.config(state=tk.DISABLED)
+
+
 def _default_font() -> tuple[str, int]:
     try:
         f = tkfont.nametofont("TkDefaultFont")
@@ -132,6 +184,7 @@ def main(
         apply_window_chrome,
         bind_close,
         bind_hub_destroy,
+        bind_path_row_dnd,
         run_mainloop,
         safe_after,
         tk_host,
@@ -192,6 +245,7 @@ def main(
     _thumb_photo: tk.PhotoImage | None = None
     _preview_path: Path | None = None
     _preview_ocr: str = ""
+    _preview_cue: str = ""
     _ocr_apply_source_iid: str | None = None
     _ocr_apply_srt_numbers: set[int] = set()
     _last_sel_iid_for_apply: str | None = None
@@ -242,6 +296,16 @@ def main(
         btn = ttk.Button(rf, text="찾아보기…", command=pick)
         btn.grid(row=0, column=1)
         browse_widgets.extend([ent, btn])
+        bind_path_row_dnd(
+            ent,
+            rf,
+            var,
+            mode="dir" if is_dir else "file",
+            extensions=() if is_dir else tuple(
+                ext.strip().lstrip("*") for _label, ext in (filetypes or [("SRT", "*.srt")])
+            ),
+            on_set=lambda _p: (refresh_count(), persist()),
+        )
 
     def refresh_count() -> None:
         png = Path(png_var.get().strip())
@@ -271,10 +335,11 @@ def main(
         clear_keyword_filter()
 
     def clear_preview() -> None:
-        nonlocal _thumb_photo, _preview_path, _preview_ocr
+        nonlocal _thumb_photo, _preview_path, _preview_ocr, _preview_cue
         _thumb_photo = None
         _preview_path = None
         _preview_ocr = ""
+        _preview_cue = ""
         thumb_img_lbl.configure(image="", text="(미리보기 없음)")
         preview_name_var.set("")
         preview_ocr_var.set("")
@@ -286,39 +351,17 @@ def main(
         if text:
             n = len(_ocr_preview_tokens(text))
             return f"{text}  ({n}개 단어)"
-        return "(인식된 단어 없음 — 이미지에 글자가 없거나 OCR 인식 실패)"
+        return _OCR_EMPTY_MSG
 
     def _fill_preview_ocr_text(ocr_preview: str, cue_text: str) -> None:
-        preview_ocr_txt.config(state=tk.NORMAL)
-        preview_ocr_txt.delete("1.0", tk.END)
-        tokens = _ocr_preview_tokens(ocr_preview)
-        if not tokens:
-            preview_ocr_txt.insert(
-                tk.END,
-                "(인식된 단어 없음 — 이미지에 글자가 없거나 OCR 인식 실패)",
-                "empty",
-            )
-        else:
-            matched_set = set()
-            _, matched_list = ocr_words_in_cue_text(ocr_preview, cue_text or "")
-            for m in matched_list:
-                matched_set.add(m.strip())
-            for i, word in enumerate(tokens):
-                if i > 0:
-                    preview_ocr_txt.insert(tk.END, ", ", "sep")
-                tag = (
-                    "match"
-                    if word in matched_set or _ocr_token_matches_cue(word, cue_text)
-                    else "normal"
-                )
-                preview_ocr_txt.insert(tk.END, word, tag)
-        preview_ocr_txt.config(state=tk.DISABLED)
+        _fill_ocr_text_widget(preview_ocr_txt, ocr_preview, cue_text)
 
     def open_large_viewer(
         path: Path | None,
         *,
         title_extra: str = "",
         ocr_words: str = "",
+        cue_text: str = "",
     ) -> None:
         if path is None or not path.is_file():
             messagebox.showwarning("미리보기", "표시할 이미지 파일이 없습니다.")
@@ -364,10 +407,24 @@ def main(
         if ocr_show:
             ttk.Label(
                 frm_img,
-                text=f"OCR 식별 단어: {ocr_show}",
+                text="OCR 식별 단어 (노란=대본 일치 · 빨강=오타)",
                 wraplength=max_w,
-                foreground="#1565c0",
+                foreground="#444444",
             ).pack(anchor=tk.W, pady=(6, 0))
+            ocr_txt = tk.Text(
+                frm_img,
+                height=3,
+                wrap=tk.WORD,
+                font=("", 9),
+                relief=tk.FLAT,
+                borderwidth=1,
+                highlightthickness=1,
+                state=tk.DISABLED,
+                cursor="arrow",
+            )
+            _configure_ocr_text_tags(ocr_txt)
+            _fill_ocr_text_widget(ocr_txt, ocr_show, cue_text)
+            ocr_txt.pack(anchor=tk.W, fill=tk.X)
         ttk.Label(frm_img, text="더블클릭 또는 Esc 로 닫기", foreground="#666666").pack(
             pady=(4, 0)
         )
@@ -396,7 +453,7 @@ def main(
         return row.source
 
     def show_preview_for_iid(iid: str | None) -> None:
-        nonlocal _thumb_photo, _preview_path, _preview_ocr
+        nonlocal _thumb_photo, _preview_path, _preview_ocr, _preview_cue
         if not iid or iid not in rows_by_iid:
             clear_preview()
             return
@@ -406,6 +463,7 @@ def main(
         _preview_path = path
         ocr = row.ocr_preview.strip().replace("\n", " ")
         _preview_ocr = ocr
+        _preview_cue = row.cue_text.strip()
         if current_name:
             preview_name_var.set(current_name)
         else:
@@ -851,6 +909,15 @@ def main(
         in_cue, _matched = ocr_words_in_cue_text(ocr, cue)
         return in_cue
 
+    def _row_tree_tags(row: MatchPreview) -> tuple[str, ...]:
+        if not row.can_rename and not row.ocr_preview:
+            return ("muted",)
+        if _row_has_ocr_typo(row):
+            return ("unmatched",)
+        if filename_matches_script_number(row):
+            return ("matched",)
+        return ("unmatched",)
+
     def _insert_row(row: MatchPreview, *, default_checked: bool) -> None:
         iid = str(id(row))
         rows_by_iid[iid] = row
@@ -866,13 +933,7 @@ def main(
         map_disp = (row.match_reason or "—")[:160]
         apply_disp = "적용" if _row_show_apply_button(row) else ""
         download_disp = _download_img_display(row)[:80]
-        tags: tuple[str, ...] = ()
-        if not row.can_rename and not row.ocr_preview:
-            tags = ("muted",)
-        elif filename_matches_script_number(row):
-            tags = ("matched",)
-        else:
-            tags = ("unmatched",)
+        tags = _row_tree_tags(row)
         tree.insert(
             "",
             tk.END,
@@ -1070,7 +1131,7 @@ def main(
     thumb_img_lbl.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
     preview_name_lbl = ttk.Label(preview_frm, textvariable=preview_name_var)
     preview_name_lbl.pack(anchor=tk.W, fill=tk.X)
-    ttk.Label(preview_frm, text="OCR 조합 단어 (정확도 순 · 노란=대본 일치)", foreground="#1565c0").pack(
+    ttk.Label(preview_frm, text="OCR 조합 단어 (정확도 순 · 노란=대본 일치 · 빨강=오타)", foreground="#1565c0").pack(
         anchor=tk.W, fill=tk.X, pady=(6, 0)
     )
     preview_ocr_txt = tk.Text(
@@ -1084,10 +1145,7 @@ def main(
         state=tk.DISABLED,
         cursor="arrow",
     )
-    preview_ocr_txt.tag_configure("match", background=_OCR_MATCH_BG)
-    preview_ocr_txt.tag_configure("normal", foreground="#1565c0")
-    preview_ocr_txt.tag_configure("empty", foreground="#888888")
-    preview_ocr_txt.tag_configure("sep", foreground="#1565c0")
+    _configure_ocr_text_tags(preview_ocr_txt)
     preview_ocr_txt.pack(anchor=tk.W, fill=tk.X)
     preview_cue_lbl = ttk.Label(
         preview_frm,
@@ -2384,13 +2442,7 @@ def main(
         map_disp = (row.match_reason or "—")[:160]
         apply_disp = "적용" if _row_show_apply_button(row) else ""
         download_disp = _download_img_display(row)[:80]
-        tags: tuple[str, ...] = ()
-        if not row.can_rename and not row.ocr_preview:
-            tags = ("muted",)
-        elif filename_matches_script_number(row):
-            tags = ("matched",)
-        else:
-            tags = ("unmatched",)
+        tags = _row_tree_tags(row)
 
         tree.item(
             iid,
@@ -2661,7 +2713,11 @@ def main(
 
     def on_thumb_double_click(_event: tk.Event) -> None:
         if _preview_path is not None:
-            open_large_viewer(_preview_path, ocr_words=_preview_ocr)
+            open_large_viewer(
+                _preview_path,
+                ocr_words=_preview_ocr,
+                cue_text=_preview_cue,
+            )
 
     thumb_img_lbl.bind("<Double-1>", on_thumb_double_click)
 

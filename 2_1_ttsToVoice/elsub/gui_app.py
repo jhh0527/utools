@@ -201,7 +201,9 @@ def main(
 ) -> None:
     from wisdom_gui_host import (
         apply_window_chrome,
+        bind_file_drop,
         bind_hub_destroy,
+        bind_path_row_dnd,
         run_mainloop,
         safe_after,
         safe_messagebox,
@@ -314,6 +316,13 @@ def main(
                     _sync_output_to_workspace()
 
         ttk.Button(rf, text="찾아보기…", command=pick).grid(row=0, column=1)
+        bind_path_row_dnd(
+            ent,
+            rf,
+            var,
+            mode="dir",
+            on_set=(lambda _p: on_focus_out()) if on_focus_out else None,
+        )
 
     def on_input_path_committed() -> None:
         p = in_var.get().strip()
@@ -406,6 +415,14 @@ def main(
 
         cfg_ent.bind("<FocusOut>", lambda _e: on_config_committed())
         ttk.Button(cfg_fr, text="찾아보기…", command=pick_config).grid(row=0, column=1)
+        bind_path_row_dnd(
+            cfg_ent,
+            cfg_fr,
+            cfg_var,
+            mode="file",
+            extensions=(".json",),
+            on_set=lambda _p: on_config_committed(),
+        )
         next_row += 2
 
     ttk.Label(
@@ -449,6 +466,26 @@ def main(
     txt = scrolledtext.ScrolledText(frm, height=16, wrap="word", font=(fam, sz))
     txt.grid(row=next_row + 2, column=0, sticky="nsew", pady=(4, 6))
     frm.grid_rowconfigure(next_row + 2, weight=1)
+
+    def _on_tts_text_drop(paths: list[str]) -> None:
+        p = Path(paths[0])
+        if p.is_dir():
+            in_var.set(str(p))
+            touch_workspace_from_path(p)
+            _sync_output_to_workspace()
+            load_from_input_dir(quiet=True)
+            return
+        if p.is_file() and p.suffix.lower() == ".txt":
+            try:
+                content = p.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                content = p.read_text(encoding="cp949", errors="replace")
+            txt.delete("1.0", tk.END)
+            txt.insert("1.0", content)
+            touch_workspace_from_path(p.parent)
+            status.set(f"파일 불러옴: {p.name}")
+
+    bind_file_drop(txt, _on_tts_text_drop)
 
     log_fr = ttk.LabelFrame(frm, text="실행 로그", padding=4)
     log_fr.grid(row=next_row + 3, column=0, sticky="nsew", pady=(0, 6))
@@ -580,7 +617,12 @@ def main(
             block = txt.get("1.0", "end-1c")
         entries = parse_knowledgetts_block(block)
         if not entries:
-            messagebox.showerror("파싱", "유효한 줄이 없습니다.\n`1-1 원본: … TTS: …` 형식인지 확인하세요.")
+            messagebox.showerror(
+                "파싱",
+                "유효한 줄이 없습니다.\n"
+                "한 줄: `1-1 원본: … TTS: …` / `1-1 原稿: … TTS: …` / `1-1 Original: … TTS: …`\n"
+                "여러 줄: `1-1` 다음 `Original:` · `TTS:` · `STT_Reference:`(선택) 형식인지 확인하세요.",
+            )
             return
 
         groups = _group_by_part(entries)

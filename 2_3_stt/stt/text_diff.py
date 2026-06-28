@@ -9,6 +9,17 @@ from dataclasses import dataclass
 
 import tkinter as tk
 
+_FULLWIDTH_ASCII = str.maketrans(
+    "０１２３４５６７８９，．％？！",
+    "0123456789,.%?!",
+)
+_KANJI_THOUSAND = (
+    ("四千", "4000"),
+    ("五千", "5000"),
+    ("4千", "4000"),
+    ("5千", "5000"),
+)
+
 
 @dataclass
 class DiffStats:
@@ -26,8 +37,37 @@ class DiffStats:
 
 
 def normalize_for_compare(text: str) -> str:
-    """비교용 공백 정리."""
-    return re.sub(r"\s+", " ", (text or "").strip())
+    """비교용 정규화 — Whisper 전사의 공백·구두점·数字 표기 차이 완화."""
+    t = (text or "").strip().translate(_FULLWIDTH_ASCII)
+    t = re.sub(r"(?<=\d),(?=\d)", "", t)
+    t = re.sub(r"(\d+)m", r"\1メートル", t)
+    for src, dst in _KANJI_THOUSAND:
+        t = t.replace(src, dst)
+    t = re.sub(r"[\s、。…?!？!「」『』\"'()（）\[\]〈〉]", "", t)
+    return t
+
+
+def diff_stats(original: str, transcribed: str, *, compare_normalized: bool = True) -> DiffStats:
+    """원본 vs STT 문자 비교 통계."""
+    stats = DiffStats()
+    if compare_normalized:
+        left = normalize_for_compare(original)
+        right = normalize_for_compare(transcribed)
+    else:
+        left = original or ""
+        right = transcribed or ""
+
+    sm = difflib.SequenceMatcher(None, left, right)
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            stats.equal_chars += i2 - i1
+        elif tag == "replace":
+            stats.diff_chars += max(i2 - i1, j2 - j1)
+        elif tag == "insert":
+            stats.extra_chars += j2 - j1
+        elif tag == "delete":
+            stats.missing_chars += i2 - i1
+    return stats
 
 
 def apply_diff_to_text(

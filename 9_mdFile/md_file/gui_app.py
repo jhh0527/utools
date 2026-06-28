@@ -34,7 +34,15 @@ def _resolve_initial_dir(saved: str | None) -> Path:
 
 
 def main(*, container: tk.Misc | None = None) -> None:
-    from wisdom_gui_host import apply_window_chrome, bind_close, bind_hub_destroy, run_mainloop, tk_host
+    from wisdom_gui_host import (
+        apply_window_chrome,
+        bind_close,
+        bind_hub_destroy,
+        bind_path_entry_dnd,
+        bind_path_row_dnd,
+        run_mainloop,
+        tk_host,
+    )
 
     cfg = load_gui_settings()
     initial = _resolve_initial_dir(cfg.get("scan_dir"))
@@ -64,7 +72,8 @@ def main(*, container: tk.Misc | None = None) -> None:
     path_fr.grid(row=0, column=0, sticky="ew", pady=(0, 8))
     path_fr.grid_columnconfigure(1, weight=1)
     ttk.Label(path_fr, text="wisdom 루트", width=10).grid(row=0, column=0, sticky="w")
-    ttk.Entry(path_fr, textvariable=scan_var).grid(row=0, column=1, sticky="ew", padx=(4, 6))
+    scan_ent = ttk.Entry(path_fr, textvariable=scan_var)
+    scan_ent.grid(row=0, column=1, sticky="ew", padx=(4, 6))
 
     def pick_dir() -> None:
         init = Path(scan_var.get().strip()) if scan_var.get().strip() else initial
@@ -77,6 +86,7 @@ def main(*, container: tk.Misc | None = None) -> None:
             refresh_list()
 
     ttk.Button(path_fr, text="찾기…", command=pick_dir).grid(row=0, column=2, padx=(0, 6))
+    bind_path_row_dnd(scan_ent, path_fr, scan_var, mode="dir", on_set=lambda _p: refresh_list())
     ttk.Button(path_fr, text="새로고침", command=lambda: refresh_list()).grid(row=0, column=3)
 
     cols = ("name", "path", "copy")

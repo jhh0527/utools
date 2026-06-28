@@ -3,6 +3,8 @@
 
 import os
 
+from PyInstaller.utils.hooks import collect_all, collect_submodules
+
 specdir = os.path.dirname(os.path.abspath(SPEC))
 proot = os.path.normpath(os.path.join(specdir, ".."))
 wisdom_repo = os.path.normpath(os.path.join(proot, ".."))
@@ -13,11 +15,16 @@ _wisdom_scripts = [
     os.path.join(wisdom_repo, "wisdom_gui_host.py"),
 ]
 
+_fw_datas, _fw_binaries, _fw_hidden = collect_all("faster_whisper")
+_ct2_datas, _ct2_binaries, _ct2_hidden = collect_all("ctranslate2")
+_av_datas, _av_binaries, _av_hidden = collect_all("av")
+_ort_datas, _ort_binaries, _ort_hidden = collect_all("onnxruntime")
+
 a = Analysis(
     [os.path.join(proot, "run_stt_gui.py"), *_wisdom_scripts],
     pathex=[proot, wisdom_repo],
-    binaries=[],
-    datas=[],
+    binaries=_fw_binaries + _ct2_binaries + _av_binaries + _ort_binaries,
+    datas=_fw_datas + _ct2_datas + _av_datas + _ort_datas,
     hiddenimports=[
         "tkinter",
         "tkinter.ttk",
@@ -32,10 +39,15 @@ a = Analysis(
         "stt.settings",
         "stt.paths",
         "faster_whisper",
+        "windnd",
         "wisdom_root",
         "wisdom_bootstrap",
         "wisdom_workspace",
         "wisdom_gui_host",
+        *_fw_hidden,
+        *_ct2_hidden,
+        *_av_hidden,
+        *_ort_hidden,
     ],
     hookspath=[],
     hooksconfig={},

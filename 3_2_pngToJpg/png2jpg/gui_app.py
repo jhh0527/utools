@@ -63,7 +63,7 @@ def main(
     initial_input: Path | None = None,
     initial_output: Path | None = None,
 ) -> None:
-    from wisdom_gui_host import apply_window_chrome, bind_close, run_mainloop, tk_host
+    from wisdom_gui_host import apply_window_chrome, bind_close, bind_path_row_dnd, run_mainloop, tk_host
     if initial_input is None and initial_output is None and len(sys.argv) > 1:
         p = argparse.ArgumentParser(add_help=False)
         p.add_argument("-i", "--input", type=Path, default=None)
@@ -138,6 +138,13 @@ def main(
         btn = ttk.Button(rf, text="폴더 선택…", command=pick)
         btn.grid(row=0, column=1)
         browse_widgets.extend([ent, btn])
+        def _on_dir_drop(_p: str) -> None:
+            if on_pick:
+                on_pick()
+            else:
+                refresh_target_count()
+
+        bind_path_row_dnd(ent, rf, var, mode="dir", on_set=_on_dir_drop)
 
     def refresh_target_count() -> None:
         inp = Path(in_var.get().strip())
