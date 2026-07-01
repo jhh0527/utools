@@ -26,5 +26,14 @@ config/wisdom_workspace.json
 /tools/ffmpeg/bin/*.dll
 4_1_video/output/*.mp4
 
+build/**/*.pkg
+build/**/*.exe
+build/**/*.pyz
+build/**/*.zip
+build/**/*.log
+
+# build 폴더의 배치 파일은 포함
+!build/**/*.bat
+
 dist/
 
