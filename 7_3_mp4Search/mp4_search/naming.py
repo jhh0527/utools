@@ -7,8 +7,8 @@ import re
 from pathlib import Path
 
 _SRT_STEM = re.compile(r"^srt[-_]?0*(\d+)\.mp4$", re.IGNORECASE)
-_SRT_ASSET = re.compile(r"^srt[-_]?0*(\d+)\.(mp4|png|jpe?g|webp)$", re.IGNORECASE)
-_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+_SRT_ASSET = re.compile(r"^srt[-_]?0*(\d+)\.(mp4|png|jpe?g|webp|gif)$", re.IGNORECASE)
+_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif"})
 ALL_MP4_NAME = "all.mp4"
 
 
@@ -92,7 +92,7 @@ def format_compose_status(folder: Path) -> str:
     mp4_map, png_map = scan_srt_assets(folder)
     lines = [f"폴더: {folder}"]
     if not mp4_map and not png_map:
-        lines.append("\nSRT_NNN.mp4 / SRT_NNN.png·jpg 형식 파일이 없습니다.")
+        lines.append("\nSRT_NNN.mp4 / SRT_NNN.png·jpg·gif 형식 파일이 없습니다.")
         return "\n".join(lines)
     matched = sorted(set(mp4_map) & set(png_map))
     only_mp4 = sorted(set(mp4_map) - set(png_map))

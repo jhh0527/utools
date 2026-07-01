@@ -16,7 +16,7 @@ IMPORTANT: Do NOT post this list to the issue-tracker. Use it as a basis for
 
 missing module named pwd - imported by posixpath (delayed, conditional, optional), shutil (delayed, optional), tarfile (optional), pathlib (delayed, optional), subprocess (delayed, conditional, optional), http.server (delayed, optional), netrc (delayed, conditional), getpass (delayed), setuptools._distutils.util (delayed, conditional, optional), setuptools._vendor.backports.tarfile (optional), setuptools._distutils.archive_util (optional)
 missing module named grp - imported by shutil (delayed, optional), tarfile (optional), pathlib (delayed, optional), subprocess (delayed, conditional, optional), setuptools._vendor.backports.tarfile (optional), setuptools._distutils.archive_util (optional)
-missing module named posix - imported by os (conditional, optional), shutil (conditional), importlib._bootstrap_external (conditional), posixpath (optional)
+missing module named posix - imported by os (conditional, optional), posixpath (optional), shutil (conditional), importlib._bootstrap_external (conditional)
 missing module named resource - imported by posix (top-level), fsspec.asyn (conditional, optional)
 missing module named _frozen_importlib_external - imported by importlib._bootstrap (delayed), importlib (optional), importlib.abc (optional), zipimport (top-level)
 excluded module named _frozen_importlib - imported by importlib (optional), importlib.abc (optional), zipimport (top-level)
@@ -81,7 +81,7 @@ missing module named Cryptodome - imported by yt_dlp.dependencies.Cryptodome (co
 missing module named yt_dlp_ejs - imported by yt_dlp.dependencies (optional)
 missing module named curl_cffi - imported by yt_dlp.dependencies (optional), yt_dlp (top-level)
 missing module named xattr - imported by yt_dlp.dependencies (optional)
-missing module named requests - imported by onnxruntime.transformers.convert_tf_models_to_pytorch (top-level), yt_dlp.dependencies (optional), fsspec.implementations.dbfs (top-level), fsspec.implementations.gist (top-level), fsspec.implementations.github (top-level), fsspec.implementations.http_sync (delayed, optional), fsspec.implementations.jupyter (top-level), fsspec.implementations.webhdfs (top-level)
+missing module named requests - imported by yt_dlp.dependencies (optional), onnxruntime.transformers.convert_tf_models_to_pytorch (top-level), fsspec.implementations.dbfs (top-level), fsspec.implementations.gist (top-level), fsspec.implementations.github (top-level), fsspec.implementations.http_sync (delayed, optional), fsspec.implementations.jupyter (top-level), fsspec.implementations.webhdfs (top-level)
 missing module named urllib3 - imported by yt_dlp.dependencies (optional)
 missing module named websockets - imported by yt_dlp.dependencies (optional)
 missing module named secretstorage - imported by yt_dlp.dependencies (optional), yt_dlp (top-level)

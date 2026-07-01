@@ -19,6 +19,7 @@ _module_dirs = (
     "4_2_ShortVideo",
     "6_thumbnail",
     "7_utube",
+    "7_2_mp4Edit",
     "7_3_mp4Search",
     "9_mdFile",
 )
@@ -63,6 +64,7 @@ _hidden_pkgs = (
     "scenevid",
     "shortvid",
     "utube",
+    "mp4_edit",
     "mp4_search",
     "thumbnail_gui",
     "md_file",

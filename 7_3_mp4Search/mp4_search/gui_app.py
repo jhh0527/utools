@@ -962,9 +962,15 @@ def main(*, container: tk.Misc | None = None) -> None:
             key = row_asset_sec(row)
             canonical = asset_starts.get(key)
             owns = canonical is not None and abs(row.timeline_start_sec - canonical) < 0.001
-            if owns or (row.mp4_path and row.mp4_path.is_file()):
+            if owns or (row.mp4_path and row.mp4_path.is_file()) or (
+                row.png_path and row.png_path.is_file()
+            ):
                 if row.mp4_path:
                     n = parse_srt_asset_number(row.mp4_path.name)
+                    if n is not None:
+                        key = n
+                elif row.png_path:
+                    n = parse_srt_asset_number(row.png_path.name)
                     if n is not None:
                         key = n
                 row.compose_status = statuses.get(key, "")
@@ -2251,6 +2257,7 @@ def main(*, container: tk.Misc | None = None) -> None:
                 asset_start_times=asset_times,
                 jobs=jobs,
                 row_lines=_row_compose_log_lines(),
+                expected_slots=_expected_mp4_slots(),
                 phase="시작",
             )
         )
@@ -2275,12 +2282,17 @@ def main(*, container: tk.Misc | None = None) -> None:
                     start = end - j.duration_sec
                     kind = "연장" if j.is_hold else ("빈구간" if j.is_gap else "재생")
                     vid = j.video.name if j.video else "-"
+                    if j.image:
+                        vid = f"{vid} + {j.image.name}"
                     safe_after(
                         root,
                         lambda s=start, e=end, k=kind, v=vid, m=j.mark_sec, i=idx: append_compose_log(
                             f"  클립 #{i:02d} {s:g}~{e:g}초 mark={m:g} [{k}] {v}"
                         ),
                     )
+
+            def on_log(msg: str) -> None:
+                safe_after(root, lambda m=msg: append_compose_log(m))
 
             try:
                 try:
@@ -2291,6 +2303,7 @@ def main(*, container: tk.Misc | None = None) -> None:
                         audio_mp3=mp3_path,
                         cancel_event=compose_cancel,
                         on_progress=on_overall,
+                        on_log=on_log,
                     )
                 except ComposeStopped as e:
                     stopped = True
@@ -2303,7 +2316,13 @@ def main(*, container: tk.Misc | None = None) -> None:
 
                 def ui_done() -> None:
                     set_compose_busy(False)
-                    compose_statuses = compose_asset_statuses(compose_jobs, mp4_map, asset_times)
+                    compose_statuses = compose_asset_statuses(
+                        compose_jobs,
+                        mp4_map,
+                        asset_times,
+                        png_map,
+                        expected_slots=_expected_mp4_slots(),
+                    )
                     if was_stopped:
                         if out_file.is_file():
                             set_compose_progress(100.0, f"합성 중지 — {ALL_MP4_NAME}")
@@ -2379,6 +2398,7 @@ def main(*, container: tk.Misc | None = None) -> None:
                     set_compose_busy(False)
                     progress_var.set(0.0)
                     progress_text_var.set("")
+                    append_compose_log(f"\n[합성 오류]\n{e}")
                     safe_messagebox(root, "showerror", "7_3 mp4Search", str(e))
 
                 safe_after(root, fail)

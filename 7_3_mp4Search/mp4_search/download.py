@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import shutil
@@ -121,6 +122,8 @@ def _compatible_mp4_encode_args() -> list[str]:
 
 
 _COMPOSE_FPS = 30
+_COMPOSE_TILE_MIN_SEC = 45.0
+_COMPOSE_TILE_MIN_SAVING_RATIO = 0.12
 
 
 def _even_dim(n: int) -> int:
@@ -813,7 +816,155 @@ def _run_ffmpeg_compose(
     return cancelled, err_text
 
 
-def compose_video_image(
+def _video_loop_seek_args(
+    video: Path,
+    start_sec: float,
+    duration_sec: float | None,
+) -> tuple[float, list[str]]:
+    """짧은 MP4 연속 재생 — 시작이 영상 길이를 넘으면 루프·시작 위치 보정."""
+    start = max(0.0, float(start_sec))
+    need = max(0.0, float(duration_sec or 0))
+    src_dur = _probe_media_duration(video)
+    if not src_dur or src_dur <= 0.05:
+        return start, []
+    if start >= src_dur - 0.02:
+        start = start % src_dur
+    loop = need > 0 and start + need > src_dur + 0.05
+    return start, (["-stream_loop", "-1"] if loop else [])
+
+
+def _duration_lcm_sec(a: float, b: float) -> float:
+    """두 미디어 길이(초)의 최소공배수 — 루프 타일 주기."""
+    scale = 100
+    ma = max(1, int(round(max(0.05, float(a)) * scale)))
+    mb = max(1, int(round(max(0.05, float(b)) * scale)))
+    g = math.gcd(ma, mb)
+    return (ma // g) * mb / scale
+
+
+def _seamless_compose_tile_sec(
+    video: Path,
+    image: Path,
+    *,
+    duration_sec: float,
+    video_start_sec: float = 0.0,
+    image_effect: str = "fixed",
+    is_hold: bool = False,
+) -> float | None:
+    """루프 복사(-stream_loop -c copy)로 늘릴 수 있는 타일 길이(초). 없으면 None."""
+    from mp4_search.image_effects import PNG_EFFECT_FIXED, normalize_png_effect
+
+    total = max(0.0, float(duration_sec))
+    if total < _COMPOSE_TILE_MIN_SEC:
+        return None
+    effect = normalize_png_effect(image_effect)
+    if effect != PNG_EFFECT_FIXED:
+        return None
+    ext = image.suffix.lower()
+    gif_dur = _probe_media_duration(image) if ext == ".gif" else None
+    video_dur = _probe_media_duration(video)
+    if is_hold and gif_dur and gif_dur > 0.05:
+        tile = min(gif_dur, total)
+        return tile if total > tile + 0.5 else None
+    if ext == ".gif" and gif_dur and gif_dur > 0.05 and video_dur and video_dur > 0.05:
+        v_loop = float(video_start_sec) + total > video_dur + 0.05
+        g_loop = total > gif_dur + 0.05
+        if v_loop and g_loop:
+            period = _duration_lcm_sec(video_dur, gif_dur)
+        elif v_loop:
+            period = float(video_dur)
+        elif g_loop:
+            return None
+        else:
+            return None
+        if period < total * (1.0 - _COMPOSE_TILE_MIN_SAVING_RATIO):
+            return min(period, total)
+    elif ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp") and video_dur and video_dur > 0.05:
+        if float(video_start_sec) + total > video_dur + 0.05:
+            period = float(video_dur)
+            if period < total * (1.0 - _COMPOSE_TILE_MIN_SAVING_RATIO):
+                return min(period, total)
+    return None
+
+
+def _extend_looped_video_copy(
+    src: Path,
+    dest: Path,
+    duration_sec: float,
+    *,
+    cancel_event: threading.Event | None = None,
+    on_progress: Callable[[float], None] | None = None,
+) -> Path:
+    """짧은 클립을 무한 루프·복사(-c copy)로 목표 길이까지 연장."""
+    src = Path(src)
+    dest = Path(dest)
+    dur = max(0.1, float(duration_sec))
+    ff = _ffmpeg_bin()
+    if not ff:
+        raise RuntimeError("영상 연장에 ffmpeg 가 필요합니다 (tools/ffmpeg).")
+    if not src.is_file():
+        raise FileNotFoundError(f"타일 없음: {src}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".loop.tmp.mp4")
+    cmd = [
+        str(ff),
+        "-y",
+        "-progress",
+        "pipe:1",
+        "-nostats",
+        "-stream_loop",
+        "-1",
+        "-i",
+        str(src),
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        str(tmp),
+    ]
+    cancelled, err_text = _run_ffmpeg_compose(
+        cmd,
+        cancel_event=cancel_event,
+        duration_sec=dur,
+        on_progress=on_progress,
+    )
+    if tmp.is_file() and tmp.stat().st_size >= 512:
+        if dest.is_file():
+            dest.unlink()
+        tmp.replace(dest)
+        if cancelled:
+            raise ComposeStopped(dest, f"합성 중지 — {dest.name}")
+        return dest
+    tmp.unlink(missing_ok=True)
+    if cancelled:
+        raise ComposeStopped(None, "합성이 중지되었습니다.")
+    raise RuntimeError((err_text or "루프 영상 연장 실패").strip()[:400])
+
+
+def _image_input_loop_args(
+    image: Path,
+    duration_sec: float | None,
+    *,
+    effect: str,
+) -> list[str]:
+    """오버레이 이미지 입력 — JPG/PNG는 정지, GIF는 애니메이션·긴 구간 루프."""
+    from mp4_search.image_effects import image_effect_needs_loop, normalize_png_effect
+
+    ext = image.suffix.lower()
+    need = max(0.0, float(duration_sec or 0))
+    if ext == ".gif":
+        gif_dur = _probe_media_duration(image)
+        if gif_dur and need > gif_dur + 0.05:
+            return ["-stream_loop", "-1"]
+        return []
+    if image_effect_needs_loop(normalize_png_effect(effect)):
+        return ["-loop", "1"]
+    if ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+        return ["-loop", "1"]
+    return []
+
+
+def _compose_video_image_encode(
     video: Path,
     image: Path,
     dest: Path,
@@ -825,9 +976,8 @@ def compose_video_image(
     cancel_event: threading.Event | None = None,
     on_progress: Callable[[float], None] | None = None,
 ) -> Path:
-    """적용된 MP4 위에 이미지를 캔버스 전체에 맞춰 오버레이하여 합성 저장."""
+    """MP4 + 이미지 오버레이 — 단일 ffmpeg 인코딩."""
     from mp4_search.image_effects import (
-        image_effect_needs_loop,
         image_overlay_filters,
         normalize_png_effect,
     )
@@ -859,8 +1009,9 @@ def compose_video_image(
         filters = [fc.replace("[vout]", "[vpre]") + f";[vpre]{norm}[vout]" for fc in filters]
     cancelled = False
     err_text = ""
-    start_sec = max(0.0, float(video_start_sec))
-    loop_img = image_effect_needs_loop(effect)
+    start_sec, video_loop_args = _video_loop_seek_args(video, video_start_sec, clip_dur)
+    image_loop_args = _image_input_loop_args(image, clip_dur, effect=effect)
+    encode_preset = "veryfast" if float(clip_dur) > 60 else "medium"
     for fc_idx, fc in enumerate(filters):
         if tmp.is_file():
             tmp.unlink(missing_ok=True)
@@ -872,11 +1023,11 @@ def compose_video_image(
             "pipe:1",
             "-nostats",
         ]
+        cmd.extend(video_loop_args)
         if start_sec > 0.01:
             cmd.extend(["-ss", f"{start_sec:.3f}"])
         cmd.extend(["-i", str(video)])
-        if loop_img:
-            cmd.extend(["-loop", "1"])
+        cmd.extend(image_loop_args)
         cmd.extend(
             [
                 "-i",
@@ -890,14 +1041,14 @@ def compose_video_image(
         if with_audio:
             cmd.extend(["-map", "0:a?"])
         if normalize_size:
-            cmd.extend(["-an", *_video_only_encode_args()])
+            cmd.extend(["-an", *_video_only_encode_args(preset=encode_preset)])
         else:
             cmd.extend(
                 [
                     "-c:v",
                     "libx264",
                     "-preset",
-                    "medium",
+                    encode_preset,
                     "-crf",
                     "20",
                     "-pix_fmt",
@@ -927,7 +1078,87 @@ def compose_video_image(
     tmp.unlink(missing_ok=True)
     if cancelled:
         raise ComposeStopped(None, "합성이 중지되었습니다.")
-    raise RuntimeError((err_text or "ffmpeg 합성 실패").strip()[:400])
+    img_label = image.name
+    if image.suffix.lower() == ".gif":
+        img_label += " (GIF)"
+    detail = (err_text or "ffmpeg 합성 실패").strip()
+    if "[timeout]" in detail:
+        detail = "ffmpeg 시간 초과 — GIF·긴 구간은 수 분 이상 걸릴 수 있습니다.\n" + detail
+    raise RuntimeError(f"{img_label} 오버레이 합성 실패 — {detail}"[:900])
+
+
+def compose_video_image(
+    video: Path,
+    image: Path,
+    dest: Path,
+    *,
+    duration_sec: float | None = None,
+    video_start_sec: float = 0.0,
+    image_effect: str = "fixed",
+    normalize_size: tuple[int, int] | None = None,
+    cancel_event: threading.Event | None = None,
+    on_progress: Callable[[float], None] | None = None,
+    is_hold: bool = False,
+) -> Path:
+    """적용된 MP4 위에 이미지를 캔버스 전체에 맞춰 오버레이하여 합성 저장."""
+    video = Path(video)
+    image = Path(image)
+    dest = Path(dest)
+    clip_dur = duration_sec
+    if not clip_dur or clip_dur <= 0:
+        clip_dur = _probe_media_duration(video) or 5.0
+    tile_dur = _seamless_compose_tile_sec(
+        video,
+        image,
+        duration_sec=float(clip_dur),
+        video_start_sec=video_start_sec,
+        image_effect=image_effect,
+        is_hold=is_hold,
+    )
+    if tile_dur and float(clip_dur) > float(tile_dur) + 0.5:
+        tile_path = dest.with_suffix(".tile.tmp.mp4")
+        tile_weight = float(tile_dur) / float(clip_dur)
+
+        def tile_progress(pct: float) -> None:
+            if on_progress:
+                on_progress(min(99.0, pct * tile_weight * 100.0))
+
+        def extend_progress(pct: float) -> None:
+            if on_progress:
+                on_progress(min(99.9, tile_weight * 100.0 + pct * (1.0 - tile_weight)))
+
+        try:
+            _compose_video_image_encode(
+                video,
+                image,
+                tile_path,
+                duration_sec=tile_dur,
+                video_start_sec=video_start_sec,
+                image_effect=image_effect,
+                normalize_size=normalize_size,
+                cancel_event=cancel_event,
+                on_progress=tile_progress,
+            )
+            return _extend_looped_video_copy(
+                tile_path,
+                dest,
+                float(clip_dur),
+                cancel_event=cancel_event,
+                on_progress=extend_progress,
+            )
+        finally:
+            tile_path.unlink(missing_ok=True)
+    return _compose_video_image_encode(
+        video,
+        image,
+        dest,
+        duration_sec=duration_sec,
+        video_start_sec=video_start_sec,
+        image_effect=image_effect,
+        normalize_size=normalize_size,
+        cancel_event=cancel_event,
+        on_progress=on_progress,
+    )
 
 
 def compose_timeline_clip(
@@ -1258,6 +1489,73 @@ def mux_mp3_to_video(
 
 
 ComposeProgressFn = Callable[[float, float | None, int, int], None]
+ComposeLogFn = Callable[[str], None]
+
+
+def format_compose_segment_log(job, idx: int, total: int) -> str:
+    """합성 클립 시작 — GIF·짧은 MP4 등 디버그용."""
+    from mp4_search.timeline_compose import TimelineComposeJob
+
+    if not isinstance(job, TimelineComposeJob):
+        return f"[클립 #{idx:02d}/{total} 시작]"
+    lines = [f"[클립 #{idx:02d}/{total} 시작] mark={job.mark_sec:g}초 · 길이 {job.duration_sec:g}초"]
+    if job.is_gap:
+        lines.append("  유형: 빈 구간")
+        return "\n".join(lines)
+    if job.is_hold:
+        lines.append("  유형: 이전 MP4 연장(정지)")
+    else:
+        lines.append("  유형: 재생")
+    if job.video and job.video.is_file():
+        vd = _probe_media_duration(job.video)
+        vs = getattr(job, "video_start_sec", 0.0)
+        vloop, _ = _video_loop_seek_args(job.video, vs, job.duration_sec)
+        tail = f" (원본 {vd:g}초)" if vd else ""
+        lines.append(f"  MP4: {job.video.name}{tail}")
+        if vs > 0.01:
+            lines.append(f"  MP4 시작오프셋: {vs:g}초")
+        if vloop:
+            lines.append("  MP4: 짧아서 루프(-stream_loop) 사용")
+    tile_sec: float | None = None
+    if job.image and job.image.is_file():
+        ext = job.image.suffix.lower()
+        idur = _probe_media_duration(job.image)
+        kind = "GIF" if ext == ".gif" else "이미지"
+        tail = f" (원본 {idur:g}초)" if idur else ""
+        lines.append(f"  {kind}: {job.image.name}{tail}")
+        iloop = _image_input_loop_args(
+            job.image, job.duration_sec, effect=getattr(job, "image_effect", "fixed")
+        )
+        if ext == ".gif" and idur and job.duration_sec > idur + 0.05:
+            lines.append(f"  → GIF 애니메이션 루프 합성 (구간 {job.duration_sec:g}초 > GIF {idur:g}초)")
+        elif iloop:
+            lines.append("  → 이미지 루프(-loop/-stream_loop) 사용")
+        if job.video and job.video.is_file():
+            tile_sec = _seamless_compose_tile_sec(
+                job.video,
+                job.image,
+                duration_sec=job.duration_sec,
+                video_start_sec=getattr(job, "video_start_sec", 0.0),
+                image_effect=getattr(job, "image_effect", "fixed"),
+                is_hold=getattr(job, "is_hold", False),
+            )
+            if tile_sec and job.duration_sec > tile_sec + 1.0:
+                reps = max(2, int(round(job.duration_sec / tile_sec)))
+                lines.append(
+                    f"  → 타일 최적화: {tile_sec:g}초 패턴 1회 인코딩 후 ×{reps} 루프 복사"
+                )
+    if job.duration_sec > 45:
+        if tile_sec and job.duration_sec > tile_sec + 1.0:
+            est_min = max(1, int(tile_sec / 45))
+            lines.append(
+                f"  ※ 긴 구간 — 타일 인코딩 중 (약 {est_min}~{est_min * 2}분, 이후 빠르게 연장)"
+            )
+        else:
+            est_min = max(1, int(job.duration_sec / 45))
+            lines.append(
+                f"  ※ 긴 구간 — ffmpeg 인코딩 중입니다 (약 {est_min}~{est_min * 2}분 소요 가능, 멈춘 것이 아님)"
+            )
+    return "\n".join(lines)
 
 
 def compose_timeline_to_all_mp4(
@@ -1268,6 +1566,7 @@ def compose_timeline_to_all_mp4(
     audio_mp3: Path | None = None,
     cancel_event: threading.Event | None = None,
     on_progress: ComposeProgressFn | None = None,
+    on_log: ComposeLogFn | None = None,
 ) -> Path:
     """타임라인 구간 클립을 렌더한 뒤 ``all.mp4`` 로 연결."""
     from mp4_search.timeline_compose import TimelineComposeJob
@@ -1285,6 +1584,11 @@ def compose_timeline_to_all_mp4(
     stopped = False
     pad_w, pad_h = _resolve_compose_size(jobs)
     norm_size = (pad_w, pad_h)
+    seg_milestones: dict[int, int] = {}
+
+    def _log(msg: str) -> None:
+        if on_log:
+            on_log(msg)
 
     def report(overall: float, mark_sec: float | None, idx: int) -> None:
         if on_progress:
@@ -1294,6 +1598,14 @@ def compose_timeline_to_all_mp4(
         base = (job_idx - 1) / total * segment_weight * 100.0
         overall = min(99.0, base + clip_pct / total * segment_weight)
         report(overall, job_mark, job_idx)
+        job = jobs[job_idx - 1]
+        if job.duration_sec > 30 and clip_pct > 0:
+            milestone = int(clip_pct // 25) * 25
+            if milestone >= 25 and milestone > seg_milestones.get(job_idx, 0):
+                seg_milestones[job_idx] = milestone
+                img = f" + {job.image.name}" if job.image else ""
+                vid = job.video.name if job.video else "?"
+                _log(f"  클립 #{job_idx:02d} 인코딩 {milestone}% … {vid}{img}")
 
     for idx, job in enumerate(jobs, 1):
         if cancel_event and cancel_event.is_set():
@@ -1302,6 +1614,7 @@ def compose_timeline_to_all_mp4(
         if not isinstance(job, TimelineComposeJob):
             raise TypeError("TimelineComposeJob 목록이 필요합니다.")
         clip_path = work_dir / f"seg_{idx:04d}.mp4"
+        _log(format_compose_segment_log(job, idx, total))
         try:
             if job.is_gap or not job.video:
                 compose_black_pad(
@@ -1331,11 +1644,19 @@ def compose_timeline_to_all_mp4(
                 cancel_event=cancel_event,
             )
             clips.append(clip_path)
+            out_dur = _probe_media_duration(clip_path)
+            out_sz = clip_path.stat().st_size if clip_path.is_file() else 0
+            dur_s = f"{out_dur:g}초" if out_dur else "?"
+            _log(f"[클립 #{idx:02d} 완료] {clip_path.name} · {dur_s} · {out_sz // 1024}KB")
         except ComposeStopped as e:
+            _log(f"[클립 #{idx:02d} 중지] {e}")
             stopped = True
             if e.path and e.path.is_file() and e.path.stat().st_size >= 512 and not clips:
                 clips.append(e.path)
             break
+        except Exception as e:
+            _log(f"[클립 #{idx:02d} 실패]\n  {e}")
+            raise
     if not clips:
         raise RuntimeError("합성된 구간 클립이 없습니다.")
     report(segment_weight * 100.0, None, 0)
@@ -1343,6 +1664,7 @@ def compose_timeline_to_all_mp4(
     mp3_path = Path(audio_mp3) if audio_mp3 else None
     mux_mp3 = bool(mp3_path and mp3_path.is_file())
     video_dest = work_dir / "_concat_video.mp4" if mux_mp3 else dest
+    _log(f"[연결 시작] 클립 {len(clips)}개 → {video_dest.name}")
     finish_cancel = None if stopped else cancel_event
 
     def concat_progress(pct: float) -> None:
@@ -1362,9 +1684,11 @@ def compose_timeline_to_all_mp4(
         stopped = True
         if not video_dest.is_file():
             raise
+    _log(f"[연결 완료] {video_dest.name}")
 
     if mux_mp3:
         report((segment_weight + concat_weight) * 100.0, None, -1)
+        _log(f"[MP3 음성 합성 시작] {mp3_path.name} → {dest.name}")
 
         def audio_progress(pct: float) -> None:
             overall = (segment_weight + concat_weight) * 100.0 + pct * audio_weight
@@ -1383,6 +1707,7 @@ def compose_timeline_to_all_mp4(
             stopped = True
             if not dest.is_file():
                 raise
+        _log(f"[MP3 음성 합성 완료] {dest.name}")
         if video_dest != dest and video_dest.is_file():
             video_dest.unlink(missing_ok=True)
     elif video_dest != dest:

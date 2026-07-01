@@ -498,7 +498,7 @@ def format_timeline_compose_status(
     lines = [f"폴더: {folder}", "", "SRT_NNN = 파일명 · 시작 = SRT 타임스탬프(초)."]
     lines.append("이미지는 해당 MP4 구간에서만 표시 (다음 MP4 시작 시 제거).")
     if not mp4_map and not png_map:
-        lines.append("\nSRT_NNN.mp4 / SRT_NNN.png·jpg 파일이 없습니다.")
+        lines.append("\nSRT_NNN.mp4 / SRT_NNN.png·jpg·gif 파일이 없습니다.")
         return "\n".join(lines)
     missing = missing_timeline_mp4_slots(mp4_map, asset_start_times)
     if missing:
@@ -571,10 +571,15 @@ def compose_asset_statuses(
     jobs: list[TimelineComposeJob],
     mp4_map: dict[int, Path],
     asset_start_times: dict[int, float] | None,
+    png_map: dict[int, Path] | None = None,
+    *,
+    expected_slots: set[int] | frozenset[int] | None = None,
 ) -> dict[int, str]:
     """자산 번호별 합성 결과 — GUI 「합성」 컬럼용."""
+    png_map = dict(png_map or {})
     switch: set[int] = set()
     hold: set[int] = set()
+    img_used: set[int] = set()
     for j in jobs:
         if j.is_gap or not j.video:
             continue
@@ -583,22 +588,25 @@ def compose_asset_statuses(
             hold.add(vf)
         else:
             switch.add(vf)
+        if j.image_from is not None:
+            img_used.add(int(j.image_from))
 
     statuses: dict[int, str] = {}
-    keys: set[int] = set(mp4_map.keys())
-    if asset_start_times:
-        keys |= set(asset_start_times.keys())
+    keys: set[int] = set(mp4_map.keys()) | set(png_map.keys())
+    if expected_slots:
+        keys |= {int(x) for x in expected_slots}
     for k in sorted(keys):
-        if k not in mp4_map:
-            if asset_start_times and k in asset_start_times:
-                statuses[k] = "누락"
-            continue
-        if k in switch:
-            statuses[k] = "합성완료·연장" if k in hold else "합성완료"
-        elif k in hold:
-            statuses[k] = "연장만"
-        else:
-            statuses[k] = "미포함"
+        if k in mp4_map:
+            if k in switch:
+                statuses[k] = "합성완료·연장" if k in hold else "합성완료"
+            elif k in hold:
+                statuses[k] = "연장만"
+            else:
+                statuses[k] = "미포함"
+        elif k in png_map:
+            statuses[k] = "합성완료" if k in img_used else "미포함"
+        elif expected_slots and k in expected_slots:
+            statuses[k] = "누락"
     return statuses
 
 
@@ -614,6 +622,7 @@ def format_compose_debug_log(
     extra_mp4: dict[int, Path] | None = None,
     extra_png: dict[int, Path] | None = None,
     asset_start_times: dict[int, float] | None = None,
+    expected_slots: set[int] | frozenset[int] | None = None,
     jobs: list[TimelineComposeJob] | None = None,
     row_lines: list[str] | None = None,
     phase: str = "plan",
@@ -685,7 +694,15 @@ def format_compose_debug_log(
         for k in sorted(asset_start_times):
             mark = asset_timeline_mark(k, asset_start_times)
             fn = mp4_map.get(k)
-            fn_s = fn.name if fn else "(파일 없음)"
+            img = png_map.get(k)
+            if fn and img:
+                fn_s = f"{fn.name} + {img.name}"
+            elif fn:
+                fn_s = fn.name
+            elif img:
+                fn_s = img.name
+            else:
+                fn_s = "(파일 없음)"
             lines.append(f"  SRT_{k:03d} → {mark:g}초 · {fn_s}")
 
     schedule = asset_mark_schedule(mp4_map, png_map, asset_start_times)
@@ -730,7 +747,9 @@ def format_compose_debug_log(
             )
             pos = end
 
-        statuses = compose_asset_statuses(jobs, mp4_map, asset_start_times)
+        statuses = compose_asset_statuses(
+            jobs, mp4_map, asset_start_times, png_map, expected_slots=expected_slots
+        )
         if statuses:
             lines.append("")
             lines.append("[자산별 합성 상태]")
