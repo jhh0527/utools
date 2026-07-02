@@ -14,7 +14,10 @@ from tkinter import filedialog, font as tkfont, messagebox, scrolledtext, ttk
 from mp4_search import __version__
 from mp4_search.image_effects import (
     PNG_EFFECT_BY_LABEL,
+    PNG_EFFECT_FIXED,
     PNG_EFFECT_LABELS_LIST,
+    PNG_EFFECT_ZOOM_IN,
+    PNG_EFFECT_ZOOM_OUT,
     normalize_png_effect,
     png_effect_label,
 )
@@ -204,7 +207,15 @@ def main(*, container: tk.Misc | None = None) -> None:
     def set_busy(on: bool) -> None:
         busy["v"] = on
         if not compose_busy["v"]:
-            for w in (btn_load, btn_apply, btn_optimize_img, btn_compose, btn_play):
+            for w in (
+                btn_load,
+                btn_apply,
+                btn_optimize_img,
+                btn_zoom_fx,
+                btn_reset_fx,
+                btn_compose,
+                btn_play,
+            ):
                 w.state(["disabled"] if on else ["!disabled"])
         if not search_busy["v"] and not compose_busy["v"]:
             btn_search.state(["disabled"] if on else ["!disabled"])
@@ -213,10 +224,26 @@ def main(*, container: tk.Misc | None = None) -> None:
         search_busy["v"] = on
         btn_search.state(["disabled"] if on else ["!disabled"])
         if on:
-            for w in (btn_load, btn_apply, btn_optimize_img, btn_compose, btn_play):
+            for w in (
+                btn_load,
+                btn_apply,
+                btn_optimize_img,
+                btn_zoom_fx,
+                btn_reset_fx,
+                btn_compose,
+                btn_play,
+            ):
                 w.state(["disabled"])
         elif not busy["v"] and not compose_busy["v"]:
-            for w in (btn_load, btn_apply, btn_optimize_img, btn_compose, btn_play):
+            for w in (
+                btn_load,
+                btn_apply,
+                btn_optimize_img,
+                btn_zoom_fx,
+                btn_reset_fx,
+                btn_compose,
+                btn_play,
+            ):
                 w.state(["!disabled"])
 
     def set_compose_busy(on: bool) -> None:
@@ -224,11 +251,19 @@ def main(*, container: tk.Misc | None = None) -> None:
         btn_compose.state(["disabled"] if on else ["!disabled"])
         btn_compose_stop.state(["!disabled"] if on else ["disabled"])
         if on:
-            for w in (btn_load, btn_apply, btn_optimize_img, btn_play):
+            for w in (btn_load, btn_apply, btn_optimize_img, btn_zoom_fx, btn_reset_fx, btn_play):
                 w.state(["disabled"])
             btn_search.state(["disabled"])
         elif not busy["v"] and not search_busy["v"]:
-            for w in (btn_load, btn_apply, btn_optimize_img, btn_compose, btn_play):
+            for w in (
+                btn_load,
+                btn_apply,
+                btn_optimize_img,
+                btn_zoom_fx,
+                btn_reset_fx,
+                btn_compose,
+                btn_play,
+            ):
                 w.state(["!disabled"])
             btn_search.state(["!disabled"])
 
@@ -400,6 +435,10 @@ def main(*, container: tk.Misc | None = None) -> None:
     btn_apply.pack(side=tk.LEFT, padx=(0, 8))
     btn_optimize_img = ttk.Button(ctrl_fr, text="이미지 최적화")
     btn_optimize_img.pack(side=tk.LEFT, padx=(0, 8))
+    btn_zoom_fx = ttk.Button(ctrl_fr, text="이미지줌인아웃효과")
+    btn_zoom_fx.pack(side=tk.LEFT, padx=(0, 8))
+    btn_reset_fx = ttk.Button(ctrl_fr, text="이미지효과초기화")
+    btn_reset_fx.pack(side=tk.LEFT, padx=(0, 8))
     btn_compose = ttk.Button(ctrl_fr, text="④ 합성 (MP4+PNG)")
     btn_compose.pack(side=tk.LEFT, padx=(0, 8))
     btn_compose_stop = ttk.Button(ctrl_fr, text="합성중지", state=["disabled"])
@@ -717,6 +756,59 @@ def main(*, container: tk.Misc | None = None) -> None:
                 if n is not None:
                     fx[n] = normalize_png_effect(row.png_effect)
         return fx
+
+    def _png_asset_groups() -> list[tuple[int, list[str]]]:
+        """PNG 자산 번호 → 해당 행 iid 목록 (타임라인 순)."""
+        by_asset: dict[int, list[str]] = {}
+        asset_time: dict[int, float] = {}
+        for iid, row in rows.items():
+            if not row.png_path or not row.png_path.is_file():
+                continue
+            n = parse_srt_asset_number(row.png_path.name)
+            if n is None:
+                continue
+            t = float(row.timeline_start_sec)
+            if n not in by_asset:
+                by_asset[n] = []
+                asset_time[n] = t
+            else:
+                asset_time[n] = min(asset_time[n], t)
+            if iid not in by_asset[n]:
+                by_asset[n].append(iid)
+        return [(n, by_asset[n]) for n in sorted(by_asset, key=lambda k: asset_time[k])]
+
+    def apply_alternating_zoom_effects() -> None:
+        if not rows:
+            safe_messagebox(root, "showinfo", "7_3 mp4Search", "먼저 「① 목록 조회」로 SRT 구간을 불러오세요.")
+            return
+        _close_cell_editor(save=True)
+        groups = _png_asset_groups()
+        if not groups:
+            safe_messagebox(root, "showinfo", "7_3 mp4Search", "PNG가 지정된 이미지가 없습니다.")
+            return
+        n_set = 0
+        for idx, (_asset, iids) in enumerate(groups):
+            effect = PNG_EFFECT_ZOOM_IN if idx % 2 == 0 else PNG_EFFECT_ZOOM_OUT
+            for iid in iids:
+                rows[iid].png_effect = effect
+                refresh_tree_values(iid)
+            n_set += 1
+        status_var.set(f"이미지 효과 — 줌인/줌아웃 번갈아 {n_set}개 적용")
+
+    def reset_all_png_effects() -> None:
+        if not rows:
+            return
+        _close_cell_editor(save=True)
+        n_reset = 0
+        for iid, row in rows.items():
+            if normalize_png_effect(row.png_effect) == PNG_EFFECT_FIXED:
+                continue
+            row.png_effect = PNG_EFFECT_FIXED
+            refresh_tree_values(iid)
+            n_reset += 1
+        status_var.set(
+            f"이미지 효과 초기화 — 고정 {n_reset}개" if n_reset else "이미지 효과 — 변경할 항목 없음 (모두 고정)"
+        )
 
     def section_label(row: CueRow) -> str:
         if row.cue_ids and len(row.cue_ids) > 1:
@@ -2431,6 +2523,8 @@ def main(*, container: tk.Misc | None = None) -> None:
     btn_search.configure(command=run_search)
     btn_apply.configure(command=run_apply)
     btn_optimize_img.configure(command=run_optimize_images)
+    btn_zoom_fx.configure(command=apply_alternating_zoom_effects)
+    btn_reset_fx.configure(command=reset_all_png_effects)
     btn_compose.configure(command=run_compose)
     btn_compose_stop.configure(command=stop_compose)
     btn_play.configure(command=run_play)
