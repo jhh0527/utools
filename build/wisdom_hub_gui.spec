@@ -10,9 +10,7 @@ wisdom_repo = os.path.normpath(os.path.join(specdir, ".."))
 _module_dirs = (
     "1_1_textTo700Text",
     "2_1_ttsToVoice",
-    "2_2_srtToImage",
     "2_3_stt",
-    "2_4_imageToMp4",
     "3_1_pngFileName",
     "3_2_pngToJpg",
     "4_1_video",
@@ -47,18 +45,13 @@ _av_datas, _av_binaries, _av_hidden = collect_all("av")
 _ort_datas, _ort_binaries, _ort_hidden = collect_all("onnxruntime")
 
 _example = os.path.join(wisdom_repo, "2_1_ttsToVoice", "elsub_config.example.json")
-_image_guide = os.path.join(wisdom_repo, "2_2_srtToImage", "md", "image.md.txt")
 datas = []
 if os.path.isfile(_example):
     datas.append((_example, "."))
-if os.path.isfile(_image_guide):
-    datas.append((_image_guide, "md"))
 
 _hidden_pkgs = (
     "elsub",
-    "prompt2image",
     "stt",
-    "image_to_mp4",
     "png_rename",
     "png2jpg",
     "scenevid",

@@ -11,8 +11,8 @@ from pathlib import Path
 MARKER_DIRS = (
     "2_1_ttsToVoice",
     "4_1_video",
-    "2_2_srtToImage",
     "1_1_textTo700Text",
+    "7_2_mp4Edit",
 )
 
 # canonical → 예전 폴더명 (작업 폴더·저장 경로 호환)

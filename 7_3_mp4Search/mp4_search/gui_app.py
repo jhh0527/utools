@@ -31,6 +31,7 @@ from mp4_search.download import (
     copy_local_video,
     download_thumbnail,
     download_url,
+    extract_video_frame_png,
     find_download_asset,
     play_video,
     temp_preview_path,
@@ -522,7 +523,7 @@ def main(*, container: tk.Misc | None = None) -> None:
     tree.column("srt_no", width=44, anchor=tk.CENTER, stretch=False)
     tree.column("t_start", width=56, anchor=tk.CENTER, stretch=False)
     tree.column("t_end", width=56, anchor=tk.CENTER, stretch=False)
-    tree.column("cue", width=150, anchor=tk.W, stretch=False)
+    tree.column("cue", width=250, anchor=tk.W, stretch=False)
     tree.column("keyword", width=_KEYWORD_COL_WIDTH, anchor=tk.W, stretch=False)
     tree.column("download_mp4", width=100, anchor=tk.W, stretch=False)
     tree.column("mp4_file", width=80, anchor=tk.W, stretch=False)
@@ -842,8 +843,8 @@ def main(*, container: tk.Misc | None = None) -> None:
         if not rows:
             return
         longest = max(len((r.cue_text or "").replace("\n", " ")) for r in rows.values())
-        # 한글·영문 혼합 대략 7px/자, 여백 +20, 상한 220
-        w = min(220, max(88, longest * 7 + 20))
+        # 한글·영문 혼합 대략 7px/자, 여백 +120, 상한 320 (+100px)
+        w = min(320, max(188, longest * 7 + 120))
         try:
             tree.column(_COL_CUE, width=w)
         except tk.TclError:
@@ -1638,8 +1639,43 @@ def main(*, container: tk.Misc | None = None) -> None:
             parts.append(f"MP4: {mp4.name}")
         if png:
             parts.append(f"PNG: {png.name}")
-        preview_lbl.configure(image="", text="\n".join(parts))
         query_var.set(f"MP4 폴더 — {' · '.join(parts)}")
+
+        if mp4:
+            preview_lbl.configure(image="", text=f"첫 화면 불러오는 중…\n{mp4.name}")
+
+            def work() -> None:
+                try:
+                    frame_png = temp_preview_path(".png", tag=f"row_{mp4.stem}")
+                    extract_video_frame_png(mp4, 0.0, frame_png)
+
+                    def ui() -> None:
+                        if current_row() is not row:
+                            return
+                        try:
+                            from PIL import Image, ImageTk
+
+                            im = Image.open(frame_png).convert("RGB")
+                            max_w = max(_preview_pane_width_from_sash() - 40, 280)
+                            im.thumbnail((max_w, 360))
+                            photo = ImageTk.PhotoImage(im)
+                            thumb_refs.append(photo)
+                            preview_lbl.configure(image=photo, text="")
+                            preview_lbl.image = photo
+                        except Exception:
+                            preview_lbl.configure(image="", text="\n".join(parts))
+
+                    safe_after(root, ui)
+                except Exception:
+                    def fail() -> None:
+                        if current_row() is row:
+                            preview_lbl.configure(image="", text="\n".join(parts))
+
+                    safe_after(root, fail)
+
+            threading.Thread(target=work, daemon=True).start()
+        else:
+            preview_lbl.configure(image="", text="\n".join(parts))
         if png:
             for w in images_inner.winfo_children():
                 w.destroy()
@@ -2184,7 +2220,7 @@ def main(*, container: tk.Misc | None = None) -> None:
             return
         out_dir = mp4_dir()
         set_busy(True)
-        status_var.set("이미지 최적화 중… (PNG → JPG · 전체 표시 · 해상도 맞춤)")
+        status_var.set("이미지 최적화 중… (PNG/JPG → JPG · 전체 표시 · 해상도 맞춤)")
 
         def work() -> None:
             try:
@@ -2199,20 +2235,20 @@ def main(*, container: tk.Misc | None = None) -> None:
                         _sync_row_assets_from_folder(out_dir)
                     n = len(pairs)
                     if n:
-                        status_var.set(f"이미지 최적화 완료 — PNG {n}개 → JPG")
+                        status_var.set(f"이미지 최적화 완료 — {n}개 (JPG 저장)")
                         safe_messagebox(
                             root,
                             "showinfo",
                             "7_3 mp4Search",
-                            f"PNG {n}개를 JPG로 변환하고 합성 해상도에 맞췄습니다.\n\n{detail}",
+                            f"이미지 {n}개를 JPG로 최적화하고 합성 해상도에 맞췄습니다.\n\n{detail}",
                         )
                     else:
-                        status_var.set("최적화할 PNG 없음 (mp4 폴더)")
+                        status_var.set("최적화할 이미지 없음 (mp4 폴더)")
                         safe_messagebox(
                             root,
                             "showinfo",
                             "7_3 mp4Search",
-                            f"MP4 폴더에 SRT_NNN.png 파일이 없습니다.\n\n{out_dir}",
+                            f"MP4 폴더에 SRT_NNN.png·jpg 파일이 없습니다.\n\n{out_dir}",
                         )
                     set_busy(False)
 
@@ -2372,7 +2408,14 @@ def main(*, container: tk.Misc | None = None) -> None:
                     j = compose_jobs[idx - 1]
                     end = sum(x.duration_sec for x in compose_jobs[:idx])
                     start = end - j.duration_sec
-                    kind = "연장" if j.is_hold else ("빈구간" if j.is_gap else "재생")
+                    if j.is_gap:
+                        kind = "빈구간"
+                    elif getattr(j, "is_image_only", False):
+                        kind = "이미지"
+                    elif j.is_hold:
+                        kind = "연장"
+                    else:
+                        kind = "재생"
                     vid = j.video.name if j.video else "-"
                     if j.image:
                         vid = f"{vid} + {j.image.name}"

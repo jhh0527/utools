@@ -424,8 +424,6 @@ def save_srt_image_jpg(
     if dest.suffix.lower() not in (".jpg", ".jpeg"):
         dest = dest.with_suffix(".jpg")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.is_file():
-        dest.unlink()
     if width is None or height is None:
         ref_args = (
             (reference_mp4,)
@@ -440,13 +438,22 @@ def save_srt_image_jpg(
         height = h if height is None else height
     im = Image.open(src)
     out = _resize_contain_rgb(im, width, height)
+    try:
+        same_file = src.resolve() == dest.resolve()
+    except OSError:
+        same_file = src == dest
+    if dest.is_file() and not same_file:
+        dest.unlink()
     out.save(dest, "JPEG", quality=_JPG_QUALITY, optimize=True)
     _remove_legacy_image_siblings(dest)
     return dest
 
 
+_OPTIMIZE_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif"})
+
+
 def optimize_srt_images_in_folder(folder: Path) -> list[tuple[Path, Path]]:
-    """폴더 내 ``SRT_NNN.png`` → JPG 변환 + 합성 해상도 cover 리사이즈."""
+    """폴더 내 ``SRT_NNN`` 이미지(png·jpg 등) → JPG 최적화 + 합성 해상도 리사이즈."""
     from mp4_search.naming import scan_srt_assets, srt_jpg_name
 
     folder = Path(folder)
@@ -455,7 +462,7 @@ def optimize_srt_images_in_folder(folder: Path) -> list[tuple[Path, Path]]:
     done: list[tuple[Path, Path]] = []
     for key in sorted(img_map):
         src = img_map[key]
-        if src.suffix.lower() != ".png":
+        if src.suffix.lower() not in _OPTIMIZE_IMAGE_EXTS:
             continue
         dest = folder / srt_jpg_name(key)
         save_srt_image_jpg(src, dest, width=width, height=height)
@@ -598,12 +605,18 @@ def _probe_has_audio_stream(path: Path) -> bool:
 
 
 def _resolve_compose_size(jobs: list) -> tuple[int, int]:
-    """합성 캔버스 — 모든 구간 영상의 최대 크기(상한 1920×1080, 하한 640×360)."""
+    """합성 캔버스 — 모든 구간 영상·이미지의 최대 크기(상한 1920×1080, 하한 640×360)."""
     paths = [
         Path(job.video)
         for job in jobs
         if getattr(job, "video", None) and Path(job.video).is_file()
     ]
+    if not paths:
+        paths = [
+            Path(job.image)
+            for job in jobs
+            if getattr(job, "image", None) and Path(job.image).is_file()
+        ]
     return resolve_compose_canvas_size(*paths)
 
 
@@ -650,6 +663,100 @@ def compose_black_pad(
     if cancelled:
         raise ComposeStopped(None, "합성이 중지되었습니다.")
     raise RuntimeError((err_text or "빈 구간 생성 실패").strip()[:400])
+
+
+def compose_image_only(
+    image: Path,
+    dest: Path,
+    *,
+    duration_sec: float,
+    image_effect: str = "fixed",
+    normalize_size: tuple[int, int] | None = None,
+    cancel_event: threading.Event | None = None,
+    on_progress: Callable[[float], None] | None = None,
+) -> Path:
+    """이미지만으로 타임라인 클립 생성 (검은 배경 + 이미지·줌 효과)."""
+    from mp4_search.image_effects import image_overlay_filters, normalize_png_effect
+
+    image = Path(image)
+    dest = Path(dest)
+    if not image.is_file():
+        raise FileNotFoundError(f"이미지 없음: {image}")
+    ff = _ffmpeg_bin()
+    if not ff:
+        raise RuntimeError("이미지 합성에 ffmpeg 가 필요합니다 (tools/ffmpeg).")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".compose.tmp.mp4")
+    effect = normalize_png_effect(image_effect)
+    clip_dur = max(0.1, float(duration_sec))
+    if normalize_size:
+        w, h = normalize_size
+    else:
+        w, h = resolve_compose_canvas_size(folder=dest.parent)
+    filters = image_overlay_filters(w, h, effect=effect, duration_sec=clip_dur, fps=_COMPOSE_FPS)
+    norm = _normalize_video_vf(w, h)
+    filters = [fc.replace("[vout]", "[vpre]") + f";[vpre]{norm}[vout]" for fc in filters]
+    image_loop_args = _image_input_loop_args(image, clip_dur, effect=effect)
+    encode_preset = "veryfast" if clip_dur > 60 else "medium"
+    cancelled = False
+    err_text = ""
+    for fc in filters:
+        if tmp.is_file():
+            tmp.unlink(missing_ok=True)
+        cmd = [
+            str(ff),
+            "-y",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=black:s={w}x{h}:r={_COMPOSE_FPS}",
+        ]
+        cmd.extend(image_loop_args)
+        cmd.extend(
+            [
+                "-i",
+                str(image),
+                "-filter_complex",
+                fc,
+                "-map",
+                "[vout]",
+                "-an",
+                *_video_only_encode_args(preset=encode_preset),
+                "-movflags",
+                "+faststart",
+                str(tmp),
+            ]
+        )
+        cancelled, err_text = _run_ffmpeg_compose(
+            cmd,
+            cancel_event=cancel_event,
+            duration_sec=clip_dur,
+            on_progress=on_progress,
+        )
+        if cancelled:
+            break
+        if tmp.is_file() and tmp.stat().st_size >= 512:
+            break
+    if tmp.is_file() and tmp.stat().st_size >= 512:
+        if dest.is_file():
+            dest.unlink()
+        tmp.replace(dest)
+        if cancelled:
+            raise ComposeStopped(dest, f"합성 중지 — {dest.name}")
+        return dest
+    tmp.unlink(missing_ok=True)
+    if cancelled:
+        raise ComposeStopped(None, "합성이 중지되었습니다.")
+    img_label = image.name
+    if image.suffix.lower() == ".gif":
+        img_label += " (GIF)"
+    detail = (err_text or "ffmpeg 합성 실패").strip()
+    if "[timeout]" in detail:
+        detail = "ffmpeg 시간 초과 — GIF·긴 구간은 수 분 이상 걸릴 수 있습니다.\n" + detail
+    raise RuntimeError(f"{img_label} 이미지 합성 실패 — {detail}"[:900])
 
 
 def compose_hold_video(
@@ -1502,7 +1609,9 @@ def format_compose_segment_log(job, idx: int, total: int) -> str:
     if job.is_gap:
         lines.append("  유형: 빈 구간")
         return "\n".join(lines)
-    if job.is_hold:
+    if getattr(job, "is_image_only", False):
+        lines.append("  유형: 이미지 슬라이드")
+    elif job.is_hold:
         lines.append("  유형: 이전 MP4 연장(정지)")
     else:
         lines.append("  유형: 재생")
@@ -1616,12 +1725,22 @@ def compose_timeline_to_all_mp4(
         clip_path = work_dir / f"seg_{idx:04d}.mp4"
         _log(format_compose_segment_log(job, idx, total))
         try:
-            if job.is_gap or not job.video:
+            if job.is_gap or (not job.video and not job.image):
                 compose_black_pad(
                     clip_path,
                     duration_sec=job.duration_sec,
                     width=pad_w,
                     height=pad_h,
+                    cancel_event=cancel_event,
+                    on_progress=lambda p, j=idx, m=job.mark_sec: seg_progress(j, m, p),
+                )
+            elif getattr(job, "is_image_only", False) and job.image:
+                compose_image_only(
+                    job.image,
+                    clip_path,
+                    duration_sec=job.duration_sec,
+                    image_effect=getattr(job, "image_effect", "fixed"),
+                    normalize_size=norm_size,
                     cancel_event=cancel_event,
                     on_progress=lambda p, j=idx, m=job.mark_sec: seg_progress(j, m, p),
                 )
@@ -1751,3 +1870,31 @@ def temp_preview_path(suffix: str = ".mp4", *, tag: str = "") -> Path:
     if safe:
         stem = f"{stem}_{safe}"
     return Path(tempfile.gettempdir()) / f"{stem}{suffix}"
+
+
+def extract_video_frame_png(src: Path, time_sec: float, dest: Path) -> Path:
+    """로컬 MP4 등에서 단일 프레임 PNG 추출."""
+    ff = _ffmpeg_bin()
+    if not ff:
+        raise RuntimeError("프레임 미리보기에 ffmpeg 가 필요합니다 (tools/ffmpeg).")
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    t = max(0.0, float(time_sec))
+    cmd = [
+        str(ff),
+        "-y",
+        "-ss",
+        f"{t:.3f}",
+        "-i",
+        str(src),
+        "-frames:v",
+        "1",
+        "-q:v",
+        "2",
+        str(dest),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, **_win_subprocess_flags())
+    if r.returncode != 0 or not dest.is_file():
+        err = (r.stderr or r.stdout or "프레임 추출 실패").strip()[:400]
+        raise RuntimeError(err)
+    return dest

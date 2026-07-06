@@ -12,15 +12,22 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 from mp4_edit import __version__
 from mp4_edit.ffmpeg_util import (
     crop_and_trim,
-    edit_output_path,
     extract_frame_png,
+    extract_frame_png_from_url,
     probe_duration,
     probe_video_size,
+    resolve_edit_dest,
     temp_preview_png,
 )
 from mp4_edit.paths import default_output_dir
 from mp4_edit.settings import load_gui_settings, save_gui_settings
-from mp4_edit.youtube_util import download_youtube, is_youtube_url
+from mp4_edit.youtube_util import (
+    download_youtube_section,
+    fetch_youtube_meta,
+    get_youtube_stream_url,
+    is_youtube_url,
+    youtube_video_id,
+)
 from wisdom_workspace import folder_dialog_initial, touch_workspace_from_path
 
 _MP4_EXTS = (("MP4", "*.mp4"), ("동영상", "*.mp4;*.mov;*.mkv"), ("모든 파일", "*.*"))
@@ -39,6 +46,26 @@ def _fmt_time(sec: float) -> str:
     m = int(sec // 60)
     s = sec - m * 60
     return f"{m:d}:{s:05.2f}"
+
+
+def _parse_sec(text: str) -> float | None:
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    if ":" in raw:
+        parts = raw.split(":")
+        try:
+            if len(parts) == 2:
+                return float(parts[0]) * 60.0 + float(parts[1])
+            if len(parts) == 3:
+                return float(parts[0]) * 3600.0 + float(parts[1]) * 60.0 + float(parts[2])
+        except ValueError:
+            return None
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return None
 
 
 def main(*, container: tk.Misc | None = None) -> None:
@@ -76,6 +103,10 @@ def main(*, container: tk.Misc | None = None) -> None:
     root.option_add("*Font", (fam, sz))
 
     mp4_var = tk.StringVar(value=cfg.get("mp4_path", ""))
+    out_dir_var = tk.StringVar(value=cfg.get("output_dir", ""))
+    out_name_var = tk.StringVar(value=cfg.get("output_name", ""))
+    start_entry_var = tk.StringVar(value=cfg.get("start_sec", "0"))
+    end_entry_var = tk.StringVar(value=cfg.get("end_sec", ""))
     status_var = tk.StringVar(value="MP4 파일 또는 YouTube URL 을 지정하세요.")
     start_var = tk.StringVar(value="시작: —")
     end_var = tk.StringVar(value="종료: —")
@@ -85,6 +116,9 @@ def main(*, container: tk.Misc | None = None) -> None:
 
     state: dict = {
         "path": None,
+        "youtube_url": None,
+        "youtube_id": None,
+        "stream_url": None,
         "source_text": "",
         "output_dir": default_output_dir(),
         "duration": 0.0,
@@ -105,13 +139,16 @@ def main(*, container: tk.Misc | None = None) -> None:
         "preview_job": None,
     }
 
+    if cfg.get("output_dir"):
+        state["output_dir"] = Path(cfg["output_dir"])
+
     frm = ttk.Frame(root, padding=10)
     frm.pack(fill=tk.BOTH, expand=True)
     frm.grid_columnconfigure(0, weight=1)
-    frm.grid_rowconfigure(2, weight=1)
+    frm.grid_rowconfigure(4, weight=1)
 
     path_fr = ttk.Frame(frm)
-    path_fr.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+    path_fr.grid(row=0, column=0, sticky="ew", pady=(0, 6))
     path_fr.grid_columnconfigure(1, weight=1)
     ttk.Label(path_fr, text="영상", width=8).grid(row=0, column=0, sticky="w")
     mp4_ent = ttk.Entry(path_fr, textvariable=mp4_var)
@@ -139,6 +176,73 @@ def main(*, container: tk.Misc | None = None) -> None:
     ttk.Button(path_fr, text="찾기…", command=pick_mp4).grid(row=0, column=2, padx=(0, 6))
     btn_load.grid(row=0, column=3)
 
+    save_fr = ttk.Frame(frm)
+    save_fr.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+    save_fr.grid_columnconfigure(1, weight=1)
+    save_fr.grid_columnconfigure(4, weight=1)
+    ttk.Label(save_fr, text="저장 폴더", width=8).grid(row=0, column=0, sticky="w")
+    out_dir_ent = ttk.Entry(save_fr, textvariable=out_dir_var)
+    out_dir_ent.grid(row=0, column=1, sticky="ew", padx=(4, 6))
+
+    def pick_out_dir() -> None:
+        init = Path(out_dir_var.get().strip()) if out_dir_var.get().strip() else default_output_dir()
+        if not init.is_dir():
+            init = init.parent if init.parent.is_dir() else Path.home()
+        p = filedialog.askdirectory(title="저장 폴더", initialdir=folder_dialog_initial(init))
+        if p:
+            out_dir_var.set(p)
+            state["output_dir"] = Path(p)
+
+    ttk.Button(save_fr, text="찾기…", command=pick_out_dir).grid(row=0, column=2, padx=(0, 12))
+    ttk.Label(save_fr, text="파일명", width=6).grid(row=0, column=3, sticky="w")
+    ttk.Entry(save_fr, textvariable=out_name_var, width=24).grid(row=0, column=4, sticky="ew", padx=(4, 0))
+
+    time_fr = ttk.Frame(frm)
+    time_fr.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+    ttk.Label(time_fr, text="구간(초)", width=8).pack(side=tk.LEFT)
+    ttk.Label(time_fr, text="시작").pack(side=tk.LEFT, padx=(0, 4))
+    start_entry = ttk.Entry(time_fr, textvariable=start_entry_var, width=10)
+    start_entry.pack(side=tk.LEFT, padx=(0, 12))
+    ttk.Label(time_fr, text="종료").pack(side=tk.LEFT, padx=(0, 4))
+    end_entry = ttk.Entry(time_fr, textvariable=end_entry_var, width=10)
+    end_entry.pack(side=tk.LEFT, padx=(0, 8))
+    ttk.Label(time_fr, text="(종료 비우면 끝까지 · YouTube는 이 구간만 다운로드)").pack(side=tk.LEFT)
+
+    def sync_time_entries_from_state() -> None:
+        start_entry_var.set(f"{state['start_sec']:.2f}".rstrip("0").rstrip("."))
+        if state["end_sec"] is None:
+            end_entry_var.set("")
+        else:
+            end_entry_var.set(f"{state['end_sec']:.2f}".rstrip("0").rstrip("."))
+
+    def apply_time_entries_to_state() -> None:
+        start = _parse_sec(start_entry_var.get())
+        if start is not None:
+            state["start_sec"] = min(start, max(state["duration"], 0.0))
+        end_raw = end_entry_var.get().strip()
+        if not end_raw:
+            state["end_sec"] = None
+        else:
+            end = _parse_sec(end_raw)
+            if end is not None:
+                state["end_sec"] = min(end, max(state["duration"], 0.0))
+                if state["end_sec"] <= state["start_sec"]:
+                    state["start_sec"], state["end_sec"] = state["end_sec"], state["start_sec"]
+        update_time_labels()
+        redraw_timeline()
+        save_gui_settings(
+            mp4_path=mp4_var.get().strip(),
+            output_dir=out_dir_var.get().strip(),
+            output_name=out_name_var.get().strip(),
+            start_sec=start_entry_var.get().strip(),
+            end_sec=end_entry_var.get().strip(),
+        )
+
+    start_entry.bind("<FocusOut>", lambda _e: apply_time_entries_to_state())
+    end_entry.bind("<FocusOut>", lambda _e: apply_time_entries_to_state())
+    start_entry.bind("<Return>", lambda _e: apply_time_entries_to_state())
+    end_entry.bind("<Return>", lambda _e: apply_time_entries_to_state())
+
     def on_mp4_drop(paths: list[str]) -> None:
         for raw in paths:
             text = raw.strip()
@@ -159,7 +263,7 @@ def main(*, container: tk.Misc | None = None) -> None:
     bind_file_drop(root, on_mp4_drop)
 
     ctrl_fr = ttk.Frame(frm)
-    ctrl_fr.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+    ctrl_fr.grid(row=3, column=0, sticky="ew", pady=(0, 6))
     ttk.Radiobutton(ctrl_fr, text="시작 클릭", variable=timeline_mode, value="start").pack(side=tk.LEFT, padx=(0, 8))
     ttk.Radiobutton(ctrl_fr, text="종료 클릭", variable=timeline_mode, value="end").pack(side=tk.LEFT, padx=(0, 16))
     ttk.Label(ctrl_fr, textvariable=start_var).pack(side=tk.LEFT, padx=(0, 12))
@@ -167,7 +271,7 @@ def main(*, container: tk.Misc | None = None) -> None:
     ttk.Label(ctrl_fr, textvariable=crop_var).pack(side=tk.LEFT)
 
     body = ttk.Frame(frm)
-    body.grid(row=2, column=0, sticky="nsew")
+    body.grid(row=4, column=0, sticky="nsew")
     body.grid_columnconfigure(0, weight=1)
     body.grid_rowconfigure(0, weight=1)
 
@@ -175,10 +279,10 @@ def main(*, container: tk.Misc | None = None) -> None:
     preview_cv.grid(row=0, column=0, sticky="nsew")
 
     timeline_cv = tk.Canvas(frm, height=48, bg="#222", highlightthickness=1, highlightbackground="#555")
-    timeline_cv.grid(row=3, column=0, sticky="ew", pady=(8, 4))
+    timeline_cv.grid(row=5, column=0, sticky="ew", pady=(8, 4))
 
     seek_fr = ttk.Frame(frm)
-    seek_fr.grid(row=4, column=0, sticky="ew", pady=(0, 8))
+    seek_fr.grid(row=6, column=0, sticky="ew", pady=(0, 8))
     seek_fr.grid_columnconfigure(1, weight=1)
     ttk.Label(seek_fr, text="미리보기").grid(row=0, column=0, sticky="w", padx=(0, 6))
     seek_scale = ttk.Scale(seek_fr, from_=0.0, to=1.0, orient=tk.HORIZONTAL)
@@ -186,7 +290,7 @@ def main(*, container: tk.Misc | None = None) -> None:
     ttk.Label(seek_fr, textvariable=preview_time_var, width=10).grid(row=0, column=2, padx=(6, 0))
 
     btn_fr = ttk.Frame(frm)
-    btn_fr.grid(row=5, column=0, sticky="ew")
+    btn_fr.grid(row=7, column=0, sticky="ew")
     btn_reset_start = ttk.Button(btn_fr, text="시작 초기화")
     btn_reset_start.pack(side=tk.LEFT, padx=(0, 6))
     btn_reset_end = ttk.Button(btn_fr, text="종료 초기화")
@@ -196,7 +300,7 @@ def main(*, container: tk.Misc | None = None) -> None:
     btn_crop = ttk.Button(btn_fr, text="자르기")
     btn_crop.pack(side=tk.LEFT)
 
-    ttk.Label(frm, textvariable=status_var).grid(row=6, column=0, sticky="w", pady=(8, 0))
+    ttk.Label(frm, textvariable=status_var).grid(row=8, column=0, sticky="w", pady=(8, 0))
 
     def clear_crop_visual() -> None:
         if state["rect_id"] is not None:
@@ -263,18 +367,27 @@ def main(*, container: tk.Misc | None = None) -> None:
             crop_var.set(f"영역: {x},{y} {w}×{h}")
 
     def show_frame_at(time_sec: float) -> None:
-        path: Path | None = state["path"]
-        if path is None or not path.is_file():
+        path: Path | None = state.get("path")
+        yt_url: str | None = state.get("youtube_url")
+        if (path is None or not path.is_file()) and not yt_url:
             return
         time_sec = max(0.0, min(time_sec, max(state["duration"], 0.0)))
         preview_time_var.set(_fmt_time(time_sec))
         try:
             png = temp_preview_png()
-            extract_frame_png(path, time_sec, png)
+            if path is not None and path.is_file():
+                extract_frame_png(path, time_sec, png)
+            else:
+                stream = state.get("stream_url")
+                if not stream:
+                    stream = get_youtube_stream_url(yt_url)
+                    state["stream_url"] = stream
+                extract_frame_png_from_url(stream, time_sec, png)
             from PIL import Image, ImageTk
 
             im = Image.open(png)
-            state["video_w"], state["video_h"] = im.size
+            if state["video_w"] <= 0 or state["video_h"] <= 0:
+                state["video_w"], state["video_h"] = im.size
             cw = max(preview_cv.winfo_width(), 320)
             ch = max(preview_cv.winfo_height(), 240)
             scale = min(cw / im.width, ch / im.height, 1.0)
@@ -322,6 +435,16 @@ def main(*, container: tk.Misc | None = None) -> None:
 
     seek_scale.configure(command=on_seek)
 
+    def _apply_output_dir_from_ui() -> Path:
+        raw = out_dir_var.get().strip()
+        if raw:
+            p = Path(raw)
+            state["output_dir"] = p
+            return p
+        if state.get("path"):
+            return state["path"].parent
+        return default_output_dir()
+
     def load_video(path: Path, *, source_text: str | None = None) -> None:
         path = Path(path)
         if not path.is_file():
@@ -335,20 +458,56 @@ def main(*, container: tk.Misc | None = None) -> None:
         touch_workspace_from_path(path)
         src_label = source_text or str(path)
         mp4_var.set(src_label)
-        save_gui_settings(mp4_path=src_label)
+        save_gui_settings(
+            mp4_path=src_label,
+            output_dir=out_dir_var.get().strip(),
+            output_name=out_name_var.get().strip(),
+            start_sec=start_entry_var.get().strip(),
+            end_sec=end_entry_var.get().strip(),
+        )
         state["path"] = path
+        state["youtube_url"] = None
+        state["youtube_id"] = None
+        state["stream_url"] = None
         state["source_text"] = src_label
-        state["output_dir"] = path.parent
+        if not out_dir_var.get().strip():
+            state["output_dir"] = path.parent
+            out_dir_var.set(str(path.parent))
         state["duration"] = dur
         state["video_w"], state["video_h"] = size
-        state["start_sec"] = 0.0
-        state["end_sec"] = None
+        apply_time_entries_to_state()
         clear_crop_visual()
         seek_scale.configure(to=dur if dur > 0 else 1.0)
         seek_scale.set(0.0)
+        sync_time_entries_from_state()
         update_time_labels()
         redraw_timeline()
         status_var.set(f"로드: {path.name} ({_fmt_time(dur)}, {size[0]}×{size[1]})")
+        schedule_preview(0.0)
+
+    def load_youtube(url: str, *, source_text: str | None = None) -> None:
+        src_label = source_text or url
+        mp4_var.set(src_label)
+        save_gui_settings(
+            mp4_path=src_label,
+            output_dir=out_dir_var.get().strip(),
+            output_name=out_name_var.get().strip(),
+            start_sec=start_entry_var.get().strip(),
+            end_sec=end_entry_var.get().strip(),
+        )
+        state["path"] = None
+        state["youtube_url"] = url
+        state["stream_url"] = None
+        state["source_text"] = src_label
+        state["youtube_id"] = youtube_video_id(url)
+        if not out_dir_var.get().strip():
+            state["output_dir"] = default_output_dir()
+            out_dir_var.set(str(state["output_dir"]))
+        apply_time_entries_to_state()
+        clear_crop_visual()
+        update_time_labels()
+        redraw_timeline()
+        status_var.set(f"YouTube: {state['youtube_id']} ({_fmt_time(state['duration'])})")
         schedule_preview(0.0)
 
     def resolve_and_load(text: str) -> None:
@@ -360,18 +519,21 @@ def main(*, container: tk.Misc | None = None) -> None:
             return
         if is_youtube_url(raw):
             set_busy(True)
-            status_var.set("YouTube 다운로드 중…")
+            status_var.set("YouTube 정보 조회 중…")
 
             def work() -> None:
                 try:
-                    path = download_youtube(
-                        raw,
-                        on_status=lambda msg: safe_after(root, lambda m=msg: status_var.set(m)),
-                    )
+                    meta = fetch_youtube_meta(raw)
+                    url = raw
 
                     def ok() -> None:
                         set_busy(False)
-                        load_video(path, source_text=raw)
+                        state["duration"] = meta.duration
+                        state["video_w"] = meta.width
+                        state["video_h"] = meta.height
+                        seek_scale.configure(to=meta.duration if meta.duration > 0 else 1.0)
+                        seek_scale.set(0.0)
+                        load_youtube(url, source_text=raw)
 
                     safe_after(root, ok)
                 except Exception as e:
@@ -414,6 +576,7 @@ def main(*, container: tk.Misc | None = None) -> None:
                 state["start_sec"], state["end_sec"] = state["end_sec"], state["start_sec"]
         update_time_labels()
         redraw_timeline()
+        sync_time_entries_from_state()
         seek_scale.set(t)
         schedule_preview(t)
 
@@ -443,37 +606,72 @@ def main(*, container: tk.Misc | None = None) -> None:
         state["start_sec"] = 0.0
         update_time_labels()
         redraw_timeline()
+        sync_time_entries_from_state()
 
     def reset_end() -> None:
         state["end_sec"] = None
         update_time_labels()
         redraw_timeline()
+        sync_time_entries_from_state()
 
     btn_reset_start.configure(command=reset_start)
     btn_reset_end.configure(command=reset_end)
     btn_reset_crop.configure(command=clear_crop_visual)
 
     def do_crop() -> None:
-        path: Path | None = state["path"]
-        if path is None:
+        path: Path | None = state.get("path")
+        yt_url: str | None = state.get("youtube_url")
+        if path is None and not yt_url:
             safe_messagebox(root, "showwarning", "7_2 mp4Edit", "영상을 먼저 불러오세요.")
             return
-        dest = edit_output_path(path, output_dir=state.get("output_dir"))
+        apply_time_entries_to_state()
+        out_base = _apply_output_dir_from_ui()
+        stem = state.get("youtube_id") or (path.stem if path else "output")
+        src_for_name = path or Path(stem + ".mp4")
+        dest = resolve_edit_dest(
+            src_for_name,
+            output_dir=out_base,
+            output_name=out_name_var.get().strip() or None,
+            default_stem=stem,
+        )
         start = state["start_sec"]
         end = state["end_sec"]
         crop = state["crop"]
         set_busy(True)
-        status_var.set("자르는 중…")
+        status_var.set("저장 중…")
 
         def work() -> None:
             try:
-                crop_and_trim(
-                    path,
-                    dest,
-                    start_sec=start,
-                    end_sec=end,
-                    crop_rect=crop,
-                )
+                if path is not None and path.is_file():
+                    crop_and_trim(
+                        path,
+                        dest,
+                        start_sec=start,
+                        end_sec=end,
+                        crop_rect=crop,
+                    )
+                else:
+                    tmp = dest.with_name(dest.stem + "_dl" + dest.suffix) if crop else dest
+                    work_path = download_youtube_section(
+                        yt_url,
+                        start_sec=start,
+                        end_sec=end,
+                        dest=tmp,
+                        on_status=lambda msg: safe_after(root, lambda m=msg: status_var.set(m)),
+                    )
+                    if crop is not None:
+                        crop_and_trim(
+                            work_path,
+                            dest,
+                            start_sec=0.0,
+                            end_sec=None,
+                            crop_rect=crop,
+                        )
+                        if work_path != dest:
+                            try:
+                                work_path.unlink(missing_ok=True)
+                            except OSError:
+                                pass
 
                 def ok() -> None:
                     set_busy(False)
@@ -495,7 +693,13 @@ def main(*, container: tk.Misc | None = None) -> None:
     btn_crop.configure(command=do_crop)
 
     def on_close() -> None:
-        save_gui_settings(mp4_path=mp4_var.get().strip())
+        save_gui_settings(
+            mp4_path=mp4_var.get().strip(),
+            output_dir=out_dir_var.get().strip(),
+            output_name=out_name_var.get().strip(),
+            start_sec=start_entry_var.get().strip(),
+            end_sec=end_entry_var.get().strip(),
+        )
 
     if standalone:
         bind_close(root, standalone, on_close)

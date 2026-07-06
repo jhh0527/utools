@@ -24,6 +24,7 @@ class TimelineComposeJob:
     image_effect: str = "fixed"
     is_gap: bool = False
     is_hold: bool = False
+    is_image_only: bool = False
 
 
 def merge_asset_maps(
@@ -155,10 +156,11 @@ def timeline_mark_asset_keys(
     png_map: dict[int, Path],
     asset_start_times: dict[int, float] | None,
 ) -> set[int]:
-    """합성 타임라인 마크 — MP4 파일 번호만 (PNG·SRT 줄 번호는 제외)."""
-    _ = png_map
+    """합성 타임라인 마크 — MP4 우선, MP4 없으면 이미지 파일 번호."""
     _ = asset_start_times
-    return set(mp4_map.keys())
+    if mp4_map:
+        return set(mp4_map.keys())
+    return set(png_map.keys())
 
 
 def lookup_mark_schedule(schedule: dict[float, int], mark_sec: float) -> int | None:
@@ -183,6 +185,68 @@ def asset_mark_schedule(
     for k in sorted(timeline_mark_asset_keys(mp4_map, png_map, asset_start_times)):
         schedule[asset_timeline_mark(k, asset_start_times)] = int(k)
     return schedule
+
+
+def png_mark_schedule(
+    png_map: dict[int, Path],
+    asset_start_times: dict[int, float] | None,
+) -> dict[float, int]:
+    """타임라인 시작 시각 → PNG 파일 번호."""
+    schedule: dict[float, int] = {}
+    for k in sorted(png_map.keys()):
+        schedule[asset_timeline_mark(k, asset_start_times)] = int(k)
+    return schedule
+
+
+def _compose_fallback_without_video(
+    *,
+    start: float,
+    start_i: int,
+    duration: float,
+    png_map: dict[int, Path],
+    png_schedule: dict[float, int],
+    png_effects: dict[int, str] | None,
+    last_video: Path | None,
+    last_vid_key: int | None,
+) -> TimelineComposeJob:
+    """MP4 없는 구간 — 이전 MP4 연장, PNG 단독(첫 MP4 이전 등), 또는 빈 구간."""
+    if last_video and last_video.is_file():
+        return TimelineComposeJob(
+            srt_id=start_i,
+            mark_sec=start,
+            video=last_video,
+            image=None,
+            duration_sec=duration,
+            video_from=last_vid_key or 0,
+            image_from=None,
+            is_hold=True,
+        )
+    img_key = lookup_mark_schedule(png_schedule, start)
+    if img_key is not None and img_key in png_map:
+        img_effect = "fixed"
+        if png_effects:
+            img_effect = png_effects.get(int(img_key), "fixed")
+        return TimelineComposeJob(
+            srt_id=start_i,
+            mark_sec=start,
+            video=None,
+            image=png_map[img_key],
+            duration_sec=duration,
+            video_from=0,
+            image_from=img_key,
+            image_effect=img_effect,
+            is_image_only=True,
+        )
+    return TimelineComposeJob(
+        srt_id=start_i,
+        mark_sec=start,
+        video=None,
+        image=None,
+        duration_sec=duration,
+        video_from=0,
+        image_from=None,
+        is_gap=True,
+    )
 
 
 def next_timeline_mark_after(
@@ -299,6 +363,84 @@ def png_overlay_mark_times(
     return {asset_timeline_mark(k, asset_start_times) for k in png_map}
 
 
+def _list_image_only_compose_jobs(
+    png_map: dict[int, Path],
+    segments: list[tuple[float, float]],
+    *,
+    cue_end_times: list[float] | None = None,
+    audio_sec: float | None = None,
+    png_effects: dict[int, str] | None = None,
+    asset_start_times: dict[int, float] | None = None,
+) -> list[TimelineComposeJob]:
+    """MP4 없이 ``SRT_NNN`` 이미지만으로 타임라인 클립 생성."""
+    if not png_map:
+        return []
+
+    total_end = timeline_end_sec(
+        segments,
+        {},
+        png_map,
+        cue_end_times=cue_end_times,
+        audio_sec=audio_sec,
+        asset_start_times=asset_start_times,
+    )
+    if total_end <= 0.05:
+        return []
+
+    mark_schedule: dict[float, int] = {}
+    for k in sorted(png_map.keys()):
+        mark_schedule[asset_timeline_mark(k, asset_start_times)] = int(k)
+
+    marks = sorted({0.0, float(total_end), *mark_schedule.keys()})
+    jobs: list[TimelineComposeJob] = []
+    for i, start in enumerate(marks[:-1]):
+        end = min(marks[i + 1], total_end)
+        duration = end - start
+        if duration <= 0.05:
+            continue
+        switch_key = lookup_mark_schedule(mark_schedule, start)
+        start_i = switch_key if switch_key is not None else int(start)
+
+        if switch_key is not None and switch_key in png_map:
+            img_key, image = switch_key, png_map[switch_key]
+        else:
+            hit_i = pick_asset_at_timeline(png_map, start_i)
+            if not hit_i:
+                jobs.append(
+                    TimelineComposeJob(
+                        srt_id=start_i,
+                        mark_sec=start,
+                        video=None,
+                        image=None,
+                        duration_sec=duration,
+                        video_from=0,
+                        image_from=None,
+                        is_gap=True,
+                    )
+                )
+                continue
+            img_key, image = hit_i
+
+        img_effect = "fixed"
+        if png_effects:
+            img_effect = png_effects.get(int(img_key), "fixed")
+
+        jobs.append(
+            TimelineComposeJob(
+                srt_id=start_i,
+                mark_sec=start,
+                video=None,
+                image=image,
+                duration_sec=duration,
+                video_from=0,
+                image_from=img_key,
+                image_effect=img_effect,
+                is_image_only=True,
+            )
+        )
+    return jobs
+
+
 def list_timeline_compose_jobs(
     folder: Path,
     segments: list[tuple[float, float]],
@@ -321,6 +463,15 @@ def list_timeline_compose_jobs(
         extra_png=extra_png,
     )
     if not mp4_map:
+        if png_map:
+            return _list_image_only_compose_jobs(
+                png_map,
+                segments,
+                cue_end_times=cue_end_times,
+                audio_sec=audio_sec,
+                png_effects=png_effects,
+                asset_start_times=asset_start_times,
+            )
         return []
 
     total_end = timeline_end_sec(
@@ -332,6 +483,7 @@ def list_timeline_compose_jobs(
         asset_start_times=asset_start_times,
     )
     mark_schedule = asset_mark_schedule(mp4_map, png_map, asset_start_times)
+    png_schedule = png_mark_schedule(png_map, asset_start_times)
     if mark_schedule:
         total_end = max(total_end, max(mark_schedule.keys()) + 1.0)
     if total_end <= 0.05:
@@ -363,62 +515,34 @@ def list_timeline_compose_jobs(
             vid_key, video = switch_key, mp4_map[switch_key]
             video_start = 0.0
         elif switch_key is not None:
-            if last_video and last_video.is_file():
-                jobs.append(
-                    TimelineComposeJob(
-                        srt_id=start_i,
-                        mark_sec=start,
-                        video=last_video,
-                        image=None,
-                        duration_sec=duration,
-                        video_from=last_vid_key or 0,
-                        image_from=None,
-                        is_hold=True,
-                    )
+            jobs.append(
+                _compose_fallback_without_video(
+                    start=start,
+                    start_i=start_i,
+                    duration=duration,
+                    png_map=png_map,
+                    png_schedule=png_schedule,
+                    png_effects=png_effects,
+                    last_video=last_video,
+                    last_vid_key=last_vid_key,
                 )
-            else:
-                jobs.append(
-                    TimelineComposeJob(
-                        srt_id=start_i,
-                        mark_sec=start,
-                        video=None,
-                        image=None,
-                        duration_sec=duration,
-                        video_from=0,
-                        image_from=None,
-                        is_gap=True,
-                    )
-                )
+            )
             continue
         else:
             hit_v = pick_asset_at_timeline(mp4_map, start_i)
             if not hit_v:
-                if last_video and last_video.is_file():
-                    jobs.append(
-                        TimelineComposeJob(
-                            srt_id=start_i,
-                            mark_sec=start,
-                            video=last_video,
-                            image=None,
-                            duration_sec=duration,
-                            video_from=last_vid_key or 0,
-                            image_from=None,
-                            is_hold=True,
-                        )
+                jobs.append(
+                    _compose_fallback_without_video(
+                        start=start,
+                        start_i=start_i,
+                        duration=duration,
+                        png_map=png_map,
+                        png_schedule=png_schedule,
+                        png_effects=png_effects,
+                        last_video=last_video,
+                        last_vid_key=last_vid_key,
                     )
-                else:
-                    jobs.append(
-                        TimelineComposeJob(
-                            srt_id=start_i,
-                            mark_sec=start,
-                            video=None,
-                            image=None,
-                            duration_sec=duration,
-                            video_from=0,
-                            image_from=None,
-                            is_gap=True,
-                        )
-                    )
+                )
                 continue
             vid_key, video = hit_v
             if vid_key == prev_vid_key:
@@ -465,6 +589,8 @@ def format_jobs_timeline_summary(
         end = pos + j.duration_sec
         if j.is_gap:
             label = "(빈 구간)"
+        elif j.is_image_only and j.image:
+            label = j.image.name
         elif j.video:
             label = j.video.name + (" (정지)" if j.is_hold else "")
             if j.image:
@@ -496,7 +622,10 @@ def format_timeline_compose_status(
         extra_png=extra_png,
     )
     lines = [f"폴더: {folder}", "", "SRT_NNN = 파일명 · 시작 = SRT 타임스탬프(초)."]
-    lines.append("이미지는 해당 MP4 구간에서만 표시 (다음 MP4 시작 시 제거).")
+    if mp4_map:
+        lines.append("이미지는 해당 MP4 구간에서만 표시 (다음 MP4 시작 시 제거).")
+    elif png_map:
+        lines.append("MP4 없음 — 이미지 슬라이드쇼로 합성합니다.")
     if not mp4_map and not png_map:
         lines.append("\nSRT_NNN.mp4 / SRT_NNN.png·jpg·gif 파일이 없습니다.")
         return "\n".join(lines)
@@ -552,6 +681,10 @@ def format_timeline_compose_status(
             if job.is_gap:
                 lines.append(f"  · {job.duration_sec:g}초 @ {at}초 ← (빈 구간)")
                 continue
+            if job.is_image_only:
+                img = job.image.name if job.image else "?"
+                lines.append(f"  · {job.duration_sec:g}초 @ {at}초 ← {img} (이미지)")
+                continue
             if job.is_hold:
                 vid = job.video.name if job.video else "?"
                 lines.append(f"  · {job.duration_sec:g}초 @ {at}초 ← {vid} (정지)")
@@ -581,7 +714,13 @@ def compose_asset_statuses(
     hold: set[int] = set()
     img_used: set[int] = set()
     for j in jobs:
-        if j.is_gap or not j.video:
+        if j.is_gap:
+            continue
+        if j.is_image_only:
+            if j.image_from is not None:
+                img_used.add(int(j.image_from))
+            continue
+        if not j.video:
             continue
         vf = int(j.video_from)
         if j.is_hold:
@@ -735,6 +874,8 @@ def format_compose_debug_log(
             end = pos + j.duration_sec
             if j.is_gap:
                 kind = "빈구간"
+            elif getattr(j, "is_image_only", False):
+                kind = "이미지"
             elif j.is_hold:
                 kind = "연장"
             else:

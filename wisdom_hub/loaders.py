@@ -49,16 +49,8 @@ def load_tab_ui(module: str, container: tk.Misc) -> None:
             from elsub.gui_app import main
 
             main(container=container)
-        elif module == "2_2_srtToImage":
-            from prompt2image.gui_app import main
-
-            main(container=container)
         elif module == "2_3_stt":
             from stt.gui_app import main
-
-            main(container=container)
-        elif module == "2_4_imageToMp4":
-            from image_to_mp4.gui_app import main
 
             main(container=container)
         elif module == "3_1_pngFileName":

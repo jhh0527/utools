@@ -153,6 +153,55 @@ def extract_frame_png(src: Path, time_sec: float, dest: Path) -> Path:
     return dest
 
 
+def extract_frame_png_from_url(url: str, time_sec: float, dest: Path) -> Path:
+    """HTTP(S) 스트림 URL 에서 단일 프레임 추출."""
+    ff = ffmpeg_bin()
+    if not ff:
+        raise RuntimeError("프레임 미리보기에 ffmpeg 가 필요합니다 (tools/ffmpeg).")
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    t = max(0.0, float(time_sec))
+    cmd = [
+        str(ff),
+        "-y",
+        "-ss",
+        f"{t:.3f}",
+        "-i",
+        url,
+        "-frames:v",
+        "1",
+        "-q:v",
+        "2",
+        str(dest),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, **_win_subprocess_flags())
+    if r.returncode != 0 or not dest.is_file():
+        err = (r.stderr or r.stdout or "스트림 프레임 추출 실패").strip()[:400]
+        raise RuntimeError(err)
+    return dest
+
+
+def resolve_edit_dest(
+    src: Path,
+    *,
+    output_dir: Path | None = None,
+    output_name: str | None = None,
+    default_stem: str | None = None,
+) -> Path:
+    """저장 디렉터리·파일명을 반영한 출력 경로."""
+    src = Path(src)
+    base = Path(output_dir) if output_dir else src.parent
+    stem = (default_stem or src.stem).strip() or "output"
+    suffix = src.suffix or ".mp4"
+    name = (output_name or "").strip()
+    if name:
+        p = Path(name)
+        if p.suffix:
+            return base / name
+        return base / f"{name}{suffix}"
+    return base / f"{stem}_edit{suffix}"
+
+
 def edit_output_path(src: Path, *, output_dir: Path | None = None) -> Path:
     src = Path(src)
     base = Path(output_dir) if output_dir else src.parent

@@ -1,3 +1,0 @@
-# Genspark 자동 생성·다운로드 (선택)
-playwright>=1.40
-browser-cookie3>=0.19
