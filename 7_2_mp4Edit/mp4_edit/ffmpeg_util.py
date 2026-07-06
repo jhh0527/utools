@@ -208,30 +208,17 @@ def edit_output_path(src: Path, *, output_dir: Path | None = None) -> Path:
     return base / f"{src.stem}_edit{src.suffix}"
 
 
-def crop_and_trim(
-    src: Path,
+def _trim_encode_cmd(
+    src: Path | str,
     dest: Path,
     *,
-    start_sec: float = 0.0,
-    end_sec: float | None = None,
-    crop_rect: tuple[int, int, int, int] | None = None,
-) -> Path:
-    """타임라인 구간·사각형 영역을 잘라 ``dest`` 에 저장."""
-    src = Path(src)
-    dest = Path(dest)
-    if not src.is_file():
-        raise FileNotFoundError(f"영상 없음: {src}")
+    start_sec: float,
+    clip_dur: float | None,
+    crop_rect: tuple[int, int, int, int] | None,
+) -> list[str]:
     ff = ffmpeg_bin()
     if not ff:
         raise RuntimeError("자르기에 ffmpeg 가 필요합니다 (tools/ffmpeg).")
-
-    start_sec = max(0.0, float(start_sec))
-    clip_dur: float | None = None
-    if end_sec is not None:
-        end_sec = float(end_sec)
-        if end_sec <= start_sec:
-            raise ValueError("종료 시점은 시작 시점보다 뒤여야 합니다.")
-        clip_dur = end_sec - start_sec
 
     vf_parts: list[str] = []
     if crop_rect is not None:
@@ -242,7 +229,6 @@ def crop_and_trim(
             raise ValueError("자를 영역이 너무 작습니다.")
         vf_parts.append(f"crop={w}:{h}:{x}:{y}")
 
-    dest.parent.mkdir(parents=True, exist_ok=True)
     cmd = [str(ff), "-y", "-ss", f"{start_sec:.3f}", "-i", str(src)]
     if clip_dur is not None:
         cmd.extend(["-t", f"{clip_dur:.3f}"])
@@ -265,7 +251,76 @@ def crop_and_trim(
             str(dest),
         ]
     )
-    r = subprocess.run(cmd, capture_output=True, text=True, **_win_subprocess_flags())
+    return cmd
+
+
+def _clip_duration(start_sec: float, end_sec: float | None) -> float | None:
+    start_sec = max(0.0, float(start_sec))
+    if end_sec is None:
+        return None
+    end_sec = float(end_sec)
+    if end_sec <= start_sec:
+        raise ValueError("종료 시점은 시작 시점보다 뒤여야 합니다.")
+    return end_sec - start_sec
+
+
+def trim_stream_to_file(
+    url: str,
+    dest: Path,
+    *,
+    start_sec: float = 0.0,
+    end_sec: float | None = None,
+    crop_rect: tuple[int, int, int, int] | None = None,
+    timeout: int = 600,
+) -> Path:
+    """HTTP(S) 스트림 URL 에서 구간·영역을 잘라 ``dest`` 에 저장."""
+    dest = Path(dest)
+    clip_dur = _clip_duration(start_sec, end_sec)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    cmd = _trim_encode_cmd(url, dest, start_sec=start_sec, clip_dur=clip_dur, crop_rect=crop_rect)
+    try:
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            **_win_subprocess_flags(),
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"구간 저장 시간 초과 ({timeout}초).") from e
+    if r.returncode != 0 or not dest.is_file() or dest.stat().st_size < 512:
+        err = (r.stderr or r.stdout or "구간 저장 실패").strip()[:500]
+        raise RuntimeError(err)
+    return dest
+
+
+def crop_and_trim(
+    src: Path,
+    dest: Path,
+    *,
+    start_sec: float = 0.0,
+    end_sec: float | None = None,
+    crop_rect: tuple[int, int, int, int] | None = None,
+    timeout: int = 3600,
+) -> Path:
+    """타임라인 구간·사각형 영역을 잘라 ``dest`` 에 저장."""
+    src = Path(src)
+    dest = Path(dest)
+    if not src.is_file():
+        raise FileNotFoundError(f"영상 없음: {src}")
+    clip_dur = _clip_duration(start_sec, end_sec)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    cmd = _trim_encode_cmd(src, dest, start_sec=start_sec, clip_dur=clip_dur, crop_rect=crop_rect)
+    try:
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            **_win_subprocess_flags(),
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"자르기 시간 초과 ({timeout}초).") from e
     if r.returncode != 0 or not dest.is_file() or dest.stat().st_size < 512:
         err = (r.stderr or r.stdout or "자르기 실패").strip()[:500]
         raise RuntimeError(err)

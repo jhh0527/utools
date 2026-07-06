@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from mp4_edit.ffmpeg_util import ffmpeg_bin
+from mp4_edit.ffmpeg_util import ffmpeg_bin, trim_stream_to_file
 from mp4_edit.paths import default_output_dir
 
 _YT_RE = re.compile(
@@ -61,18 +61,6 @@ def _base_opts(*, quiet: bool = True) -> dict:
     if ff:
         opts["ffmpeg_location"] = str(ff.parent)
     return opts
-
-
-def _section_time(sec: float) -> str:
-    sec = max(0.0, float(sec))
-    total = int(sec)
-    h, rem = divmod(total, 3600)
-    m, s = divmod(rem, 60)
-    if h:
-        return f"{h}:{m:02d}:{s:02d}"
-    if m:
-        return f"{m}:{s:02d}"
-    return str(total)
 
 
 def cached_download_path(url: str) -> Path | None:
@@ -190,64 +178,74 @@ def download_youtube_section(
                 return dest
             return cached
 
+        out_dir = Path(dest_dir) if dest_dir else default_output_dir()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        if dest is not None:
+            out_path = Path(dest)
+            out_tpl = str(out_path.with_suffix("")) + ".%(ext)s"
+            final_name = out_path.name if out_path.suffix else f"{out_path.name}.mp4"
+        else:
+            out_tpl = str(out_dir / f"{vid}.%(ext)s")
+            final_name = f"{vid}.mp4"
+
+        def _hook(d: dict) -> None:
+            if not on_status:
+                return
+            status = d.get("status")
+            if status == "downloading":
+                pct = d.get("_percent_str", "").strip()
+                spd = d.get("_speed_str", "").strip()
+                on_status(f"다운로드… {pct} {spd}".strip())
+            elif status == "finished":
+                on_status("병합·저장 중…")
+
+        opts = _base_opts(quiet=True)
+        opts["outtmpl"] = out_tpl
+        opts["progress_hooks"] = [_hook]
+
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+
+        if info is None:
+            raise RuntimeError("YouTube 다운로드에 실패했습니다.")
+
+        req_id = info.get("id") or vid
+        if dest is not None:
+            candidates = [out_path]
+            if not out_path.suffix:
+                candidates.append(out_path.with_suffix(".mp4"))
+        else:
+            candidates = [out_dir / final_name]
+        for ext in ("", ".mp4", ".webm", ".mkv", ".m4v"):
+            for base in candidates:
+                p = base if ext == "" else base.with_suffix(ext)
+                if p.is_file() and p.stat().st_size >= 512:
+                    return p
+            p = out_dir / f"{req_id}{ext or '.mp4'}"
+            if p.is_file() and p.stat().st_size >= 512:
+                return p
+
+        raise RuntimeError("YouTube 다운로드 파일을 찾을 수 없습니다.")
+
     out_dir = Path(dest_dir) if dest_dir else default_output_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
     if dest is not None:
         out_path = Path(dest)
-        out_tpl = str(out_path.with_suffix("")) + ".%(ext)s"
-        final_name = out_path.name if out_path.suffix else f"{out_path.name}.mp4"
+        if not out_path.suffix:
+            out_path = out_path.with_suffix(".mp4")
     else:
         tag = f"{vid}_{int(start_sec)}_{int(clip_end)}"
-        out_tpl = str(out_dir / f"{tag}.%(ext)s")
-        final_name = f"{tag}.mp4"
+        out_path = out_dir / f"{tag}.mp4"
 
-    def _hook(d: dict) -> None:
-        if not on_status:
-            return
-        status = d.get("status")
-        if status == "downloading":
-            pct = d.get("_percent_str", "").strip()
-            spd = d.get("_speed_str", "").strip()
-            on_status(f"구간 다운로드… {pct} {spd}".strip())
-        elif status == "finished":
-            on_status("병합·저장 중…")
-
-    opts = _base_opts(quiet=True)
-    opts["outtmpl"] = out_tpl
-    opts["progress_hooks"] = [_hook]
-    opts["force_keyframes_at_cuts"] = True
-
-    if full_video:
-        section = None
-    else:
-        section = f"*{_section_time(start_sec)}-{_section_time(clip_end)}"
-        try:
-            from yt_dlp.utils import download_range_func
-
-            opts["download_ranges"] = download_range_func(None, [(start_sec, clip_end)])
-        except ImportError:
-            opts["download_sections"] = [section]
-
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-
-    if info is None:
-        raise RuntimeError("YouTube 다운로드에 실패했습니다.")
-
-    req_id = info.get("id") or vid
-    if dest is not None:
-        candidates = [out_path]
-        if not out_path.suffix:
-            candidates.append(out_path.with_suffix(".mp4"))
-    else:
-        candidates = [out_dir / final_name]
-    for ext in ("", ".mp4", ".webm", ".mkv", ".m4v"):
-        for base in candidates:
-            p = base if ext == "" else base.with_suffix(ext)
-            if p.is_file() and p.stat().st_size >= 512:
-                return p
-        p = out_dir / f"{req_id}{ext or '.mp4'}"
-        if p.is_file() and p.stat().st_size >= 512:
-            return p
-
-    raise RuntimeError("YouTube 다운로드 파일을 찾을 수 없습니다.")
+    # yt-dlp download_ranges 는 일부 영상에서 무한 대기 → ffmpeg 스트림 구간 추출
+    if on_status:
+        on_status("YouTube 스트림 연결 중…")
+    stream = get_youtube_stream_url(url)
+    if on_status:
+        on_status("구간 추출·저장 중…")
+    return trim_stream_to_file(
+        stream,
+        out_path,
+        start_sec=start_sec,
+        end_sec=clip_end,
+    )
