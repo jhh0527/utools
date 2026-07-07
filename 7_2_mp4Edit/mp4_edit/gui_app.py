@@ -6,6 +6,7 @@ from __future__ import annotations
 import sys
 import threading
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
@@ -31,6 +32,8 @@ from mp4_edit.youtube_util import (
 from wisdom_workspace import folder_dialog_initial, touch_workspace_from_path
 
 _MP4_EXTS = (("MP4", "*.mp4"), ("동영상", "*.mp4;*.mov;*.mkv"), ("모든 파일", "*.*"))
+_FILMOT_URL = "https://filmot.com/"
+_YOUGLISH_URL = "https://youglish.com/"
 
 
 def _default_font() -> tuple[str, int]:
@@ -298,7 +301,9 @@ def main(*, container: tk.Misc | None = None) -> None:
     btn_reset_crop = ttk.Button(btn_fr, text="영역 초기화")
     btn_reset_crop.pack(side=tk.LEFT, padx=(0, 16))
     btn_crop = ttk.Button(btn_fr, text="자르기")
-    btn_crop.pack(side=tk.LEFT)
+    btn_crop.pack(side=tk.LEFT, padx=(0, 16))
+    ttk.Button(btn_fr, text="Filmot", command=lambda: webbrowser.open(_FILMOT_URL)).pack(side=tk.LEFT, padx=(0, 6))
+    ttk.Button(btn_fr, text="YouGlish", command=lambda: webbrowser.open(_YOUGLISH_URL)).pack(side=tk.LEFT)
 
     ttk.Label(frm, textvariable=status_var).grid(row=8, column=0, sticky="w", pady=(8, 0))
 

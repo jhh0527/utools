@@ -66,6 +66,17 @@ def load_gui_settings() -> dict[str, str]:
         v = data.get(key)
         if isinstance(v, str) and v.strip():
             out[key] = v.strip()
+    pl = data.get("play_loop")
+    if isinstance(pl, bool):
+        out["play_loop"] = "1" if pl else "0"
+    elif isinstance(pl, str) and pl.strip():
+        out["play_loop"] = pl.strip()
+    else:
+        out["play_loop"] = "0"
+    if "burn_subtitles" in data:
+        out["burn_subtitles"] = "1" if bool(data.get("burn_subtitles")) else "0"
+    else:
+        out["burn_subtitles"] = "1"
     return out
 
 
@@ -76,6 +87,8 @@ def save_gui_settings(
     download_dir: str = "",
     mp3_file: str = "",
     preview_pane_width: str = "",
+    play_loop: bool | None = None,
+    burn_subtitles: bool | None = None,
 ) -> None:
     p = config_path()
     data: dict = {}
@@ -96,5 +109,9 @@ def save_gui_settings(
         data["mp3_file"] = mp3_file.strip()
     if preview_pane_width.strip().isdigit():
         data["preview_pane_width"] = int(preview_pane_width.strip())
+    if play_loop is not None:
+        data["play_loop"] = bool(play_loop)
+    if burn_subtitles is not None:
+        data["burn_subtitles"] = bool(burn_subtitles)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")

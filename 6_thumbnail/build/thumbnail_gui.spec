@@ -3,6 +3,8 @@
 
 import os
 
+from PyInstaller.utils.hooks import collect_submodules
+
 specdir = os.path.dirname(os.path.abspath(SPEC))
 proot = os.path.normpath(os.path.join(specdir, ".."))
 wisdom_repo = os.path.normpath(os.path.join(proot, ".."))
@@ -11,6 +13,8 @@ _wisdom_scripts = [
     os.path.join(wisdom_repo, "wisdom_bootstrap.py"),
     os.path.join(wisdom_repo, "wisdom_workspace.py"),
 ]
+
+_scipy_compat_hidden = collect_submodules("scipy._external.array_api_compat")
 
 a = Analysis(
     [os.path.join(proot, "run_thumbnail_gui.py"), *_wisdom_scripts],
@@ -22,6 +26,12 @@ a = Analysis(
         "wisdom_root",
         "wisdom_bootstrap",
         "wisdom_workspace",
+        "thumbnail_gui.text_erase",
+        "cv2",
+        "easyocr",
+        "numpy",
+        "scipy",
+        *_scipy_compat_hidden,
     ],
     hookspath=[],
     hooksconfig={},

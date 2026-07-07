@@ -157,6 +157,8 @@ def main(*, container: tk.Misc | None = None) -> None:
     root.option_add("*Font", (fam, sz))
 
     srt_var = tk.StringVar(value=cfg.get("srt_file", ""))
+    burn_sub_c = tk.BooleanVar(value=cfg.get("burn_subtitles", "1") != "0")
+    play_loop_var = tk.BooleanVar(value=cfg.get("play_loop", "0") == "1")
     mp4_var = tk.StringVar(value=cfg.get("mp4_dir", "") or str(default_output_dir()))
     mp3_var = tk.StringVar(value=cfg.get("mp3_file", ""))
     download_default = cfg.get("download_dir") or str(Path.home() / "Downloads")
@@ -191,7 +193,12 @@ def main(*, container: tk.Misc | None = None) -> None:
             download_dir=download_var.get().strip(),
             mp3_file=mp3_var.get().strip(),
             preview_pane_width=str(preview_pane_w),
+            burn_subtitles=bool(burn_sub_c.get()),
+            play_loop=bool(play_loop_var.get()),
         )
+
+    def play_media(path: Path) -> None:
+        play_video(path, loop=bool(play_loop_var.get()))
 
     def suggest_mp3_from_srt() -> Path | None:
         if mp3_var.get().strip() and Path(mp3_var.get().strip()).is_file():
@@ -316,12 +323,12 @@ def main(*, container: tk.Misc | None = None) -> None:
         d = mp4_dir()
         all_path = d / ALL_MP4_NAME
         if all_path.is_file():
-            play_video(all_path)
+            play_media(all_path)
             status_var.set(f"재생: {all_path.name}")
             return
         row = current_row()
         if row and row.mp4_path and row.mp4_path.is_file():
-            play_video(row.mp4_path)
+            play_media(row.mp4_path)
             status_var.set(f"재생: {row.mp4_path.name}")
             return
         if sys_platform_open_folder(d):
@@ -370,6 +377,13 @@ def main(*, container: tk.Misc | None = None) -> None:
         persist()
 
     ttk.Button(path_fr, text="찾기…", command=pick_mp3).grid(row=3, column=2, pady=(6, 0))
+
+    ttk.Checkbutton(
+        path_fr,
+        text="영상에 자막추가",
+        variable=burn_sub_c,
+        command=persist,
+    ).grid(row=4, column=1, sticky="w", padx=(4, 0), pady=(6, 0))
 
     bind_path_row_dnd(
         path_fr,
@@ -422,7 +436,7 @@ def main(*, container: tk.Misc | None = None) -> None:
 
     usage_hint = ttk.Label(
         frm,
-        text="④ 합성 → all.mp4 (+ MP3 음성) · SRT# · 동영상 선택 · MP4 열 드롭",
+        text="④ 합성 → all.mp4 (+ MP3 음성 · 자막 옵션) · SRT# · 동영상 선택 · MP4 열 드롭",
     )
     usage_hint.grid(row=2, column=0, sticky="w", pady=(0, 4))
 
@@ -445,7 +459,24 @@ def main(*, container: tk.Misc | None = None) -> None:
     btn_compose_stop = ttk.Button(ctrl_fr, text="합성중지", state=["disabled"])
     btn_compose_stop.pack(side=tk.LEFT, padx=(0, 8))
     btn_play = ttk.Button(ctrl_fr, text="▶ 재생")
-    btn_play.pack(side=tk.LEFT)
+    btn_play.pack(side=tk.LEFT, padx=(0, 12))
+    play_mode_fr = ttk.Frame(ctrl_fr)
+    play_mode_fr.pack(side=tk.LEFT, padx=(0, 12))
+    ttk.Label(play_mode_fr, text="재생:").pack(side=tk.LEFT, padx=(0, 4))
+    ttk.Radiobutton(
+        play_mode_fr,
+        text="마지막 장면 유지",
+        value=False,
+        variable=play_loop_var,
+        command=persist,
+    ).pack(side=tk.LEFT, padx=(0, 6))
+    ttk.Radiobutton(
+        play_mode_fr,
+        text="반복",
+        value=True,
+        variable=play_loop_var,
+        command=persist,
+    ).pack(side=tk.LEFT)
     ttk.Label(ctrl_fr, text="검색 키워드").pack(side=tk.LEFT, padx=(16, 4))
     keyword_ent = ttk.Entry(ctrl_fr, textvariable=keyword_var, width=40)
     keyword_ent.pack(side=tk.LEFT, padx=(0, 4))
@@ -1611,7 +1642,7 @@ def main(*, container: tk.Misc | None = None) -> None:
                     preview_lbl.configure(image="", text=f"{target.provider} · {target.title[:40]}")
                     if autoplay:
                         try:
-                            play_video(path)
+                            play_media(path)
                             status_var.set(f"재생: {target.title[:50]} — ③ 적용 또는 [선택]")
                         except OSError as e:
                             safe_messagebox(root, "showerror", "7_3 mp4Search", str(e))
@@ -2430,12 +2461,17 @@ def main(*, container: tk.Misc | None = None) -> None:
                 safe_after(root, lambda m=msg: append_compose_log(m))
 
             try:
+                srt_path = Path(srt_var.get().strip()) if srt_var.get().strip() else None
+                if srt_path and not srt_path.is_file():
+                    srt_path = None
                 try:
                     result_path = compose_timeline_to_all_mp4(
                         jobs,
                         dest,
                         work_dir,
                         audio_mp3=mp3_path,
+                        srt_path=srt_path,
+                        burn_subtitles=bool(burn_sub_c.get()),
                         cancel_event=compose_cancel,
                         on_progress=on_overall,
                         on_log=on_log,
@@ -2557,7 +2593,7 @@ def main(*, container: tk.Misc | None = None) -> None:
             safe_messagebox(root, "showwarning", "7_3 mp4Search", "재생할 영상이 없습니다. 검색·적용 후 ▶ 재생 또는 ④ 합성(all.mp4)을 실행하세요.")
             return
         try:
-            play_video(path)
+            play_media(path)
             status_var.set(f"재생: {path.name}")
         except OSError as e:
             safe_messagebox(root, "showerror", "7_3 mp4Search", str(e))

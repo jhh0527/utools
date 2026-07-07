@@ -1667,12 +1667,81 @@ def format_compose_segment_log(job, idx: int, total: int) -> str:
     return "\n".join(lines)
 
 
+def _maybe_burn_segment_subtitles(
+    clip_path: Path,
+    *,
+    srt_path: Path | None,
+    start_sec: float,
+    duration_sec: float,
+    play_res: tuple[int, int],
+    work_dir: Path,
+    burn_subtitles: bool,
+    cancel_event: threading.Event | None = None,
+    on_progress: Callable[[float], None] | None = None,
+) -> None:
+    """구간 클립에 SRT 자막 번인 (4_1_video 와 동일 subtitles 필터)."""
+    if not burn_subtitles or srt_path is None or not Path(srt_path).is_file():
+        return
+    from mp4_search.subtitles import (
+        stage_compose_font_for_work,
+        subtitle_path_filter_arg,
+        write_timeline_segment_srt,
+    )
+
+    clip_path = Path(clip_path)
+    work_dir = Path(work_dir)
+    stage_compose_font_for_work(work_dir)
+    seg_srt = work_dir / f"{clip_path.stem}.srt"
+    if not write_timeline_segment_srt(seg_srt, Path(srt_path), start_sec, duration_sec):
+        return
+    ff = _ffmpeg_bin()
+    if not ff:
+        raise RuntimeError("자막 번인에 ffmpeg 가 필요합니다 (tools/ffmpeg).")
+    tmp = clip_path.with_suffix(".sub.tmp.mp4")
+    if tmp.is_file():
+        tmp.unlink(missing_ok=True)
+    sub_vf = subtitle_path_filter_arg(seg_srt, ffmpeg_cwd=work_dir, play_res=play_res)
+    cmd = [
+        str(ff),
+        "-y",
+        "-progress",
+        "pipe:1",
+        "-nostats",
+        "-i",
+        str(clip_path),
+        "-vf",
+        sub_vf,
+        "-an",
+        *_video_only_encode_args(preset="veryfast"),
+        "-movflags",
+        "+faststart",
+        str(tmp),
+    ]
+    cancelled, err_text = _run_ffmpeg_compose(
+        cmd,
+        cancel_event=cancel_event,
+        duration_sec=duration_sec,
+        on_progress=on_progress,
+    )
+    if tmp.is_file() and tmp.stat().st_size >= 512:
+        tmp.replace(clip_path)
+        if cancelled:
+            raise ComposeStopped(clip_path, f"합성 중지 — {clip_path.name}")
+        return
+    tmp.unlink(missing_ok=True)
+    if cancelled:
+        raise ComposeStopped(None, "합성이 중지되었습니다.")
+    raise RuntimeError((err_text or "자막 번인 실패").strip()[:400])
+
+
 def compose_timeline_to_all_mp4(
     jobs: list,
     dest: Path,
     work_dir: Path,
     *,
     audio_mp3: Path | None = None,
+    srt_path: Path | None = None,
+    burn_subtitles: bool = True,
     cancel_event: threading.Event | None = None,
     on_progress: ComposeProgressFn | None = None,
     on_log: ComposeLogFn | None = None,
@@ -1762,6 +1831,18 @@ def compose_timeline_to_all_mp4(
                 job.duration_sec,
                 cancel_event=cancel_event,
             )
+            if burn_subtitles and srt_path and Path(srt_path).is_file():
+                _maybe_burn_segment_subtitles(
+                    clip_path,
+                    srt_path=Path(srt_path),
+                    start_sec=job.mark_sec,
+                    duration_sec=job.duration_sec,
+                    play_res=norm_size,
+                    work_dir=work_dir,
+                    burn_subtitles=True,
+                    cancel_event=cancel_event,
+                    on_progress=lambda p, j=idx, m=job.mark_sec: seg_progress(j, m, min(99.0, p)),
+                )
             clips.append(clip_path)
             out_dur = _probe_media_duration(clip_path)
             out_sz = clip_path.stat().st_size if clip_path.is_file() else 0
@@ -1844,17 +1925,21 @@ def compose_timeline_to_all_mp4(
     return dest
 
 
-def play_video(path: Path) -> None:
-    """ffplay(우선) 또는 OS 기본 플레이어로 재생."""
+def play_video(path: Path, *, loop: bool = False) -> None:
+    """ffplay(우선) 또는 OS 기본 플레이어로 재생.
+
+    loop=False(기본): 1회 재생 후 마지막 프레임 유지(ffplay 창 유지).
+    loop=True: 반복 재생.
+    """
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(str(path))
     ff = _ffmpeg_exe("ffplay")
     if ff:
-        subprocess.Popen(
-            [str(ff), "-autoexit", "-window_title", "7_3 mp4Search", str(path)],
-            **_win_subprocess_flags(),
-        )
+        cmd = [str(ff), "-window_title", "7_3 mp4Search", str(path)]
+        if loop:
+            cmd[1:1] = ["-loop", "0"]
+        subprocess.Popen(cmd, **_win_subprocess_flags())
         return
     if sys.platform == "win32":
         os.startfile(str(path))  # noqa: S606

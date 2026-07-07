@@ -10,7 +10,6 @@ wisdom_repo = os.path.normpath(os.path.join(specdir, ".."))
 _module_dirs = (
     "1_1_textTo700Text",
     "2_1_ttsToVoice",
-    "2_3_stt",
     "3_1_pngFileName",
     "3_2_pngToJpg",
     "4_1_video",
@@ -51,7 +50,6 @@ if os.path.isfile(_example):
 
 _hidden_pkgs = (
     "elsub",
-    "stt",
     "png_rename",
     "png2jpg",
     "scenevid",
@@ -94,7 +92,13 @@ hiddenimports: list[str] = [
     "PIL.ImageFont",
     "PIL.ImageTk",
     "PIL._tkinter_finder",
+    "cv2",
+    "easyocr",
+    "numpy",
+    "thumbnail_gui.text_erase",
 ]
+_scipy_compat_hidden = collect_submodules("scipy._external.array_api_compat")
+hiddenimports += ["scipy", *_scipy_compat_hidden]
 for _pkg in _hidden_pkgs:
     hiddenimports += collect_submodules(_pkg)
 hiddenimports += collect_submodules("yt_dlp")

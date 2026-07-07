@@ -48,8 +48,10 @@ if errorlevel 1 (
 
 if exist "%~dp0work" rmdir /s /q "%~dp0work"
 
-echo 빌드 도구 설치...
+echo 빌드 도구·모듈 의존성 설치...
 "!PYEXE!" -m pip install -q -r "%~dp0requirements-build.txt"
+if errorlevel 1 exit /b 1
+"!PYEXE!" -m pip install -q -r "%~dp0..\requirements.txt"
 if errorlevel 1 exit /b 1
 
 echo PyInstaller 실행...

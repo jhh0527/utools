@@ -28,14 +28,10 @@ config/wisdom_workspace.json
 # GitHub 100MB 제한 — 합성 영상은 로컬만 보관
 4_1_video/output/*.mp4
 
+**/build/**
+!**/build/**/*.bat
 
-build/**/*.pkg
-build/**/*.exe
-build/**/*.pyz
-build/**/*.zip
-build/**/*.log
-
-# build 폴더의 배치 파일은 포함
-!build/**/*.bat
+*.pkg
+*.pyz
+*.exe
 dist/
-

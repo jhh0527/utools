@@ -2,7 +2,36 @@
 <module type="JAVA_MODULE" version="4">
   <component name="NewModuleRootManager" inherit-compiler-output="true">
     <exclude-output />
-    <content url="file://$MODULE_DIR$" />
+    <content url="file://$MODULE_DIR$">
+      <excludeFolder url="file://$MODULE_DIR$/1_1_textTo700Text/build/work/manuscript_700_splitter/localpycs" />
+      <excludeFolder url="file://$MODULE_DIR$/1_1_textTo700Text/dist" />
+      <excludeFolder url="file://$MODULE_DIR$/2_1_ttsToVoice/build/work" />
+      <excludeFolder url="file://$MODULE_DIR$/2_1_ttsToVoice/dist" />
+      <excludeFolder url="file://$MODULE_DIR$/3_1_pngFileName/build/work_rebuild/png_rename_gui/localpycs" />
+      <excludeFolder url="file://$MODULE_DIR$/3_1_pngFileName/dist" />
+      <excludeFolder url="file://$MODULE_DIR$/3_2_pngToJpg/dist" />
+      <excludeFolder url="file://$MODULE_DIR$/4_1_video/build/scenevid" />
+      <excludeFolder url="file://$MODULE_DIR$/4_1_video/build/scenevid_gui" />
+      <excludeFolder url="file://$MODULE_DIR$/4_1_video/build/work" />
+      <excludeFolder url="file://$MODULE_DIR$/4_1_video/demo_project/images" />
+      <excludeFolder url="file://$MODULE_DIR$/4_1_video/dist" />
+      <excludeFolder url="file://$MODULE_DIR$/4_2_ShortVideo/build/work/shortvid_gui/localpycs" />
+      <excludeFolder url="file://$MODULE_DIR$/4_2_ShortVideo/dist" />
+      <excludeFolder url="file://$MODULE_DIR$/6_thumbnail/build/work/thumbnail_gui/localpycs" />
+      <excludeFolder url="file://$MODULE_DIR$/6_thumbnail/dist" />
+      <excludeFolder url="file://$MODULE_DIR$/7_2_mp4Edit/build/work" />
+      <excludeFolder url="file://$MODULE_DIR$/7_2_mp4Edit/dist" />
+      <excludeFolder url="file://$MODULE_DIR$/7_3_mp4Search/build/work/mp4_search_gui/localpycs" />
+      <excludeFolder url="file://$MODULE_DIR$/7_3_mp4Search/build/_probe_out" />
+      <excludeFolder url="file://$MODULE_DIR$/7_3_mp4Search/dist" />
+      <excludeFolder url="file://$MODULE_DIR$/7_utube/build/work" />
+      <excludeFolder url="file://$MODULE_DIR$/7_utube/dist" />
+      <excludeFolder url="file://$MODULE_DIR$/8_fileExplorer/dist" />
+      <excludeFolder url="file://$MODULE_DIR$/9_mdFile/dist" />
+      <excludeFolder url="file://$MODULE_DIR$/build/wisdom_hub_gui/localpycs" />
+      <excludeFolder url="file://$MODULE_DIR$/config" />
+      <excludeFolder url="file://$MODULE_DIR$/dist" />
+    </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>

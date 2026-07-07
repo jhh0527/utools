@@ -13,6 +13,8 @@ from tkinter import colorchooser, filedialog, font as tkfont, messagebox, ttk
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
+from thumbnail_gui.text_erase import inpaint_text_regions
+
 _IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 _PRESET_VERSION = 1
 _FONT_PRESET_DIRECT = "(파일에서 직접…)"  # 구 preset 호환용, UI 에는 미표시
@@ -221,10 +223,13 @@ def render_thumbnail_layers_image(
     tw: int,
     th: int,
     layers: list[dict[str, str | int]],
+    erase_regions: list[dict[str, int]] | None = None,
 ) -> Image.Image:
     im = Image.open(src).convert("RGB")
     canvas = Image.new("RGB", (tw, th), (18, 18, 22))
     _paste_fit_cover(canvas, im)
+    if erase_regions:
+        canvas = inpaint_text_regions(canvas, list(erase_regions))
     dr = ImageDraw.Draw(canvas)
     for layer in layers:
         text = str(layer.get("text") or "").strip()
@@ -273,8 +278,11 @@ def render_thumbnail_layers(
     tw: int,
     th: int,
     layers: list[dict[str, str | int]],
+    erase_regions: list[dict[str, int]] | None = None,
 ) -> None:
-    canvas = render_thumbnail_layers_image(src, tw=tw, th=th, layers=layers)
+    canvas = render_thumbnail_layers_image(
+        src, tw=tw, th=th, layers=layers, erase_regions=erase_regions
+    )
     dst.parent.mkdir(parents=True, exist_ok=True)
     suf = dst.suffix.lower()
     if suf == ".png":
@@ -322,7 +330,11 @@ def main(*, container: tk.Misc | None = None) -> None:
     cur_layer_idx = tk.IntVar(value=0)
     resize_drag: dict[str, int | bool] = {"active": False, "x": 0, "y": 0, "tw": 0, "th": 0}
     text_drag: dict[str, int | bool] = {"active": False, "x": 0, "y": 0, "start_ox": 0, "start_oy": 0}
+    erase_regions: list[dict[str, int]] = []
+    preview_mode = tk.StringVar(value="text")
+    erase_rect_drag: dict[str, int | bool] = {"active": False, "x0": 0, "y0": 0, "x1": 0, "y1": 0}
     preview_size: dict[str, int] = {"iw": 0, "ih": 0}
+    erase_status_var = tk.StringVar(value="지우기 영역: 0개")
 
     anchors = [
         ("lt", "좌상"),
@@ -341,10 +353,11 @@ def main(*, container: tk.Misc | None = None) -> None:
 
     preview_img_ref: dict[str, object] = {"ph": None}
     prev_wrap = ttk.Frame(root)
+    _preview_canvas_h = 380 if standalone else 240
     prev_canvas = tk.Canvas(
         prev_wrap,
         width=640,
-        height=380,
+        height=_preview_canvas_h,
         bg="#222",
         highlightthickness=1,
         highlightbackground="#555",
@@ -509,6 +522,7 @@ def main(*, container: tk.Misc | None = None) -> None:
             "tw": tw_var.get().strip(),
             "th": th_var.get().strip(),
             "layers": [dict(x) for x in layers],
+            "erase_regions": [dict(x) for x in erase_regions],
         }
         try:
             Path(p).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -573,6 +587,24 @@ def main(*, container: tk.Misc | None = None) -> None:
             if new_layers:
                 layers.clear()
                 layers.extend(new_layers)
+        raw_er = data.get("erase_regions")
+        if isinstance(raw_er, list):
+            erase_regions.clear()
+            for item in raw_er:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    erase_regions.append(
+                        {
+                            "x1": int(item.get("x1", 0)),
+                            "y1": int(item.get("y1", 0)),
+                            "x2": int(item.get("x2", 0)),
+                            "y2": int(item.get("y2", 0)),
+                        }
+                    )
+                except (TypeError, ValueError):
+                    continue
+        refresh_erase_listbox()
         cur_layer_idx.set(0)
         sync_layer_to_form()
         refresh_layer_listbox()
@@ -618,7 +650,71 @@ def main(*, container: tk.Misc | None = None) -> None:
             tags=("resize_handle",),
         )
 
+    def _canvas_to_image_xy(e: tk.Event) -> tuple[int, int]:
+        cx = int(prev_canvas.canvasx(e.x))
+        cy = int(prev_canvas.canvasy(e.y))
+        iw = int(preview_size.get("iw", 0))
+        ih = int(preview_size.get("ih", 0))
+        if iw <= 0 or ih <= 0:
+            return 0, 0
+        return max(0, min(cx, iw - 1)), max(0, min(cy, ih - 1))
+
+    def refresh_erase_listbox() -> None:
+        lb_erase.delete(0, tk.END)
+        for j, R in enumerate(erase_regions):
+            x1 = int(R.get("x1", 0))
+            y1 = int(R.get("y1", 0))
+            x2 = int(R.get("x2", 0))
+            y2 = int(R.get("y2", 0))
+            lb_erase.insert(tk.END, f"{j + 1}. ({x1},{y1})-({x2},{y2})")
+        erase_status_var.set(f"지우기 영역: {len(erase_regions)}개")
+
+    def _draw_erase_region_overlays() -> None:
+        prev_canvas.delete("erase_region")
+        for R in erase_regions:
+            x1 = int(R.get("x1", 0))
+            y1 = int(R.get("y1", 0))
+            x2 = int(R.get("x2", 0))
+            y2 = int(R.get("y2", 0))
+            prev_canvas.create_rectangle(
+                x1,
+                y1,
+                x2,
+                y2,
+                outline="#ff5555",
+                width=2,
+                dash=(5, 3),
+                tags=("erase_region",),
+            )
+
+    def delete_erase_region() -> None:
+        sel = lb_erase.curselection()
+        if not sel:
+            messagebox.showinfo("글자 지우기", "삭제할 영역을 목록에서 선택하세요.")
+            return
+        erase_regions.pop(int(sel[0]))
+        refresh_erase_listbox()
+        if _resolve_src_image() is not None:
+            do_preview()
+
+    def clear_erase_regions() -> None:
+        if not erase_regions:
+            return
+        if not messagebox.askyesno("글자 지우기", "지우기 영역을 모두 삭제할까요?"):
+            return
+        erase_regions.clear()
+        refresh_erase_listbox()
+        if _resolve_src_image() is not None:
+            do_preview()
+
     def _on_canvas_press(e: tk.Event) -> None:
+        if preview_mode.get() == "erase" and preview_img_ref["ph"] is not None:
+            x, y = _canvas_to_image_xy(e)
+            erase_rect_drag["active"] = True
+            erase_rect_drag["x0"] = x
+            erase_rect_drag["y0"] = y
+            prev_canvas.delete("erase_temp")
+            return
         hit = prev_canvas.find_closest(e.x, e.y)
         if hit and "resize_handle" in prev_canvas.gettags(hit[0]):
             try:
@@ -632,6 +728,8 @@ def main(*, container: tk.Misc | None = None) -> None:
             resize_drag["th"] = th0
             return
         if preview_img_ref["ph"] is None:
+            return
+        if preview_mode.get() != "text":
             return
         sync_form_to_layer()
         i = cur_layer_idx.get()
@@ -653,6 +751,23 @@ def main(*, container: tk.Misc | None = None) -> None:
         text_drag["start_oy"] = oy
 
     def _on_canvas_motion(e: tk.Event) -> None:
+        if erase_rect_drag["active"]:
+            x0 = int(erase_rect_drag["x0"])
+            y0 = int(erase_rect_drag["y0"])
+            x1, y1 = _canvas_to_image_xy(e)
+            erase_rect_drag["x1"] = x1
+            erase_rect_drag["y1"] = y1
+            prev_canvas.delete("erase_temp")
+            prev_canvas.create_rectangle(
+                x0,
+                y0,
+                x1,
+                y1,
+                outline="#ffaa00",
+                width=2,
+                tags=("erase_temp",),
+            )
+            return
         if resize_drag["active"]:
             dx = e.x - int(resize_drag["x"])
             dy = e.y - int(resize_drag["y"])
@@ -670,7 +785,23 @@ def main(*, container: tk.Misc | None = None) -> None:
         layers[i]["offset_y"] = int(text_drag["start_oy"]) + dy
         sync_layer_to_form()
 
-    def _on_canvas_release(_e: tk.Event) -> None:
+    def _on_canvas_release(e: tk.Event) -> None:
+        if erase_rect_drag["active"]:
+            erase_rect_drag["active"] = False
+            prev_canvas.delete("erase_temp")
+            if preview_img_ref["ph"] is None:
+                return
+            x0 = int(erase_rect_drag["x0"])
+            y0 = int(erase_rect_drag["y0"])
+            x1 = int(erase_rect_drag.get("x1", x0))
+            y1 = int(erase_rect_drag.get("y1", y0))
+            if abs(x1 - x0) < 8 or abs(y1 - y0) < 8:
+                return
+            erase_regions.append({"x1": x0, "y1": y0, "x2": x1, "y2": y1})
+            refresh_erase_listbox()
+            if _resolve_src_image() is not None:
+                do_preview()
+            return
         if resize_drag["active"]:
             resize_drag["active"] = False
             if _resolve_src_image() is not None:
@@ -680,6 +811,36 @@ def main(*, container: tk.Misc | None = None) -> None:
             text_drag["active"] = False
             if _resolve_src_image() is not None:
                 do_preview()
+
+    def enter_erase_mode() -> None:
+        preview_mode.set("erase")
+        erase_status_var.set(
+            f"영역 지정 모드 — 미리보기에서 드래그 (현재 {len(erase_regions)}개)"
+        )
+        if _resolve_src_image() is not None and preview_img_ref["ph"] is None:
+            do_preview()
+
+    def enter_text_mode() -> None:
+        preview_mode.set("text")
+
+    def do_erase() -> None:
+        """지정 영역에 EasyOCR + inpaint 적용 후 미리보기 갱신."""
+        if not erase_regions:
+            messagebox.showinfo(
+                "글자 지우기",
+                "먼저 「영역 지정」을 누른 뒤, 미리보기에서 드래그해 지울 영역을 그리세요.",
+            )
+            return
+        do_preview()
+
+    def do_refresh() -> None:
+        """원본 이미지 파일을 디스크에서 다시 읽어 미리보기를 갱신."""
+        sync_form_to_layer()
+        src = _resolve_src_image()
+        if src is None:
+            messagebox.showwarning("새로 고침", "원본 이미지 파일을 선택하세요.")
+            return
+        do_preview()
 
     def do_preview() -> None:
         """화면 미리보기만 갱신 (파일 저장 없음 — videoPG)."""
@@ -694,7 +855,16 @@ def main(*, container: tk.Misc | None = None) -> None:
             messagebox.showerror("미리보기", "가로·세로는 정수로 입력하세요.")
             return
         try:
-            im = render_thumbnail_layers_image(src, tw=tw, th=th, layers=list(layers))
+            if erase_regions:
+                erase_status_var.set("EasyOCR + inpaint 처리 중…")
+                root.update_idletasks()
+            im = render_thumbnail_layers_image(
+                src,
+                tw=tw,
+                th=th,
+                layers=list(layers),
+                erase_regions=list(erase_regions),
+            )
             ph = ImageTk.PhotoImage(im)
             prev_canvas.delete("all")
             iw, ih = ph.width(), ph.height()
@@ -702,9 +872,12 @@ def main(*, container: tk.Misc | None = None) -> None:
             prev_canvas.create_image(0, 0, anchor="nw", image=ph, tags=("preview_img",))
             preview_img_ref["ph"] = ph
             _draw_resize_handle(iw, ih)
+            _draw_erase_region_overlays()
+            refresh_erase_listbox()
             prev_canvas.configure(scrollregion=(0, 0, max(iw + 16, 1), max(ih + 16, 1)))
         except Exception as e:
-            messagebox.showerror("미리보기", str(e))
+            erase_status_var.set(f"지우기 영역: {len(erase_regions)}개")
+            messagebox.showerror("미리보기", f"EasyOCR/inpaint 처리 실패:\n{e}")
 
     def do_save() -> None:
         """저장 버튼으로만 최종 이미지 파일을 씁니다."""
@@ -727,7 +900,14 @@ def main(*, container: tk.Misc | None = None) -> None:
             return
         dst = od / f"thumb_{src.stem}.jpg"
         try:
-            render_thumbnail_layers(src, dst, tw=tw, th=th, layers=list(layers))
+            render_thumbnail_layers(
+                src,
+                dst,
+                tw=tw,
+                th=th,
+                layers=list(layers),
+                erase_regions=list(erase_regions),
+            )
             messagebox.showinfo("저장", f"저장했습니다.\n{dst.resolve()}")
         except Exception as e:
             messagebox.showerror("저장", str(e))
@@ -923,18 +1103,44 @@ def main(*, container: tk.Misc | None = None) -> None:
     root.grid_rowconfigure(r, weight=1)
     r += 1
 
+    erase_lf = ttk.LabelFrame(root, text="글자 지우기 (EasyOCR + cv2.inpaint)")
+    erase_lf.grid(row=r, column=0, columnspan=3, sticky="ew", padx=8, pady=4)
+    erase_lf.grid_columnconfigure(0, weight=1)
+    emode = ttk.Frame(erase_lf)
+    emode.grid(row=0, column=0, columnspan=2, sticky="w", padx=6, pady=(4, 2))
+    ttk.Radiobutton(
+        emode, text="텍스트 배치", value="text", variable=preview_mode, command=enter_text_mode
+    ).pack(side=tk.LEFT, padx=(0, 12))
+    ttk.Radiobutton(
+        emode, text="지우기 영역 지정", value="erase", variable=preview_mode, command=enter_erase_mode
+    ).pack(side=tk.LEFT)
+    lb_erase = tk.Listbox(erase_lf, height=2, exportselection=False)
+    lb_erase.grid(row=1, column=0, sticky="ew", padx=6, pady=4)
+    ebtn = ttk.Frame(erase_lf)
+    ebtn.grid(row=1, column=1, sticky="ns", padx=(0, 6), pady=4)
+    ttk.Button(ebtn, text="선택 삭제", command=delete_erase_region).pack(fill=tk.X, pady=(0, 4))
+    ttk.Button(ebtn, text="전체 삭제", command=clear_erase_regions).pack(fill=tk.X)
+    ttk.Label(erase_lf, textvariable=erase_status_var).grid(row=2, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 4))
+    r += 1
+
     btns = ttk.Frame(root)
-    btns.grid(row=r, column=0, columnspan=3, sticky="w", padx=8, pady=8)
-    ttk.Button(btns, text="미리보기", command=do_preview).pack(side=tk.LEFT, padx=(0, 8))
-    ttk.Button(btns, text="저장 (최종 저장)", command=do_save).pack(side=tk.LEFT, padx=(0, 8))
+    btns.grid(row=r, column=0, columnspan=3, sticky="ew", padx=8, pady=8)
+    ttk.Button(btns, text="미리보기", command=do_preview).pack(side=tk.LEFT, padx=(0, 6))
+    ttk.Button(btns, text="새로 고침", command=do_refresh).pack(side=tk.LEFT, padx=(0, 6))
+    ttk.Button(btns, text="저장 (최종 저장)", command=do_save).pack(side=tk.LEFT, padx=(0, 12))
+    ttk.Separator(btns, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=(0, 12))
+    ttk.Button(btns, text="영역 지정", command=enter_erase_mode).pack(side=tk.LEFT, padx=(0, 6))
+    ttk.Button(btns, text="지우기", command=do_erase).pack(side=tk.LEFT, padx=(0, 6))
+    ttk.Button(btns, text="텍스트 배치", command=enter_text_mode).pack(side=tk.LEFT, padx=(0, 8))
     ttk.Label(
         btns,
-        text="미리보기: 텍스트 드래그 → 위치 이동 · 우하 핸들 → 가로·세로 조절",
-    ).pack(side=tk.LEFT, padx=(8, 0))
+        text="지우기: 영역 지정 → 드래그 → 지우기 | 텍스트: 텍스트 배치 후 드래그",
+    ).pack(side=tk.LEFT, padx=(4, 0))
     r += 1
 
     lb_layers.bind("<<ListboxSelect>>", on_layer_select)
     refresh_layer_listbox()
+    refresh_erase_listbox()
     refresh_font_combobox()
     default_thumbnail_output_dir().mkdir(parents=True, exist_ok=True)
     show_preview_empty()
