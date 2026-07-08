@@ -8,7 +8,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
+
+from mp4_edit.log_util import mp4_edit_log, mp4_edit_log_exc
 
 
 _WIN_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -23,7 +26,7 @@ def _win_subprocess_flags() -> dict:
 def _tool_bases() -> list[Path]:
     if getattr(sys, "frozen", False):
         exe = Path(sys.executable).resolve()
-        return [exe.parent, exe.parent.parent]
+        return [exe.parent, exe.parent.parent, exe.parent.parent.parent]
     here = Path(__file__).resolve()
     return [here.parents[1], here.parents[2]]
 
@@ -234,23 +237,25 @@ def _trim_encode_cmd(
         cmd.extend(["-t", f"{clip_dur:.3f}"])
     if vf_parts:
         cmd.extend(["-vf", ",".join(vf_parts)])
-    cmd.extend(
-        [
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
-            "-crf",
-            "18",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-movflags",
-            "+faststart",
-            str(dest),
-        ]
-    )
+        cmd.extend(
+            [
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                "18",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-movflags",
+                "+faststart",
+                str(dest),
+            ]
+        )
+    else:
+        cmd.extend(["-c", "copy", "-avoid_negative_ts", "make_zero", str(dest)])
     return cmd
 
 
@@ -278,6 +283,11 @@ def trim_stream_to_file(
     clip_dur = _clip_duration(start_sec, end_sec)
     dest.parent.mkdir(parents=True, exist_ok=True)
     cmd = _trim_encode_cmd(url, dest, start_sec=start_sec, clip_dur=clip_dur, crop_rect=crop_rect)
+    mp4_edit_log(
+        f"trim_stream_to_file start dest={dest} start={start_sec} end={end_sec} "
+        f"timeout={timeout}s cmd={' '.join(cmd[:8])}…"
+    )
+    t0 = time.monotonic()
     try:
         r = subprocess.run(
             cmd,
@@ -287,10 +297,14 @@ def trim_stream_to_file(
             **_win_subprocess_flags(),
         )
     except subprocess.TimeoutExpired as e:
+        mp4_edit_log(f"trim_stream_to_file TIMEOUT ({timeout}s) dest={dest}")
         raise RuntimeError(f"구간 저장 시간 초과 ({timeout}초).") from e
+    elapsed = time.monotonic() - t0
     if r.returncode != 0 or not dest.is_file() or dest.stat().st_size < 512:
         err = (r.stderr or r.stdout or "구간 저장 실패").strip()[:500]
+        mp4_edit_log(f"trim_stream_to_file FAIL rc={r.returncode} ({elapsed:.1f}s) err={err[:200]!r}")
         raise RuntimeError(err)
+    mp4_edit_log(f"trim_stream_to_file ok dest={dest} size={dest.stat().st_size} ({elapsed:.1f}s)")
     return dest
 
 
@@ -311,6 +325,11 @@ def crop_and_trim(
     clip_dur = _clip_duration(start_sec, end_sec)
     dest.parent.mkdir(parents=True, exist_ok=True)
     cmd = _trim_encode_cmd(src, dest, start_sec=start_sec, clip_dur=clip_dur, crop_rect=crop_rect)
+    mp4_edit_log(
+        f"crop_and_trim start src={src} dest={dest} start={start_sec} end={end_sec} "
+        f"crop={crop_rect} timeout={timeout}s"
+    )
+    t0 = time.monotonic()
     try:
         r = subprocess.run(
             cmd,
@@ -320,10 +339,14 @@ def crop_and_trim(
             **_win_subprocess_flags(),
         )
     except subprocess.TimeoutExpired as e:
+        mp4_edit_log(f"crop_and_trim TIMEOUT ({timeout}s) dest={dest}")
         raise RuntimeError(f"자르기 시간 초과 ({timeout}초).") from e
+    elapsed = time.monotonic() - t0
     if r.returncode != 0 or not dest.is_file() or dest.stat().st_size < 512:
         err = (r.stderr or r.stdout or "자르기 실패").strip()[:500]
+        mp4_edit_log(f"crop_and_trim FAIL rc={r.returncode} ({elapsed:.1f}s) err={err[:200]!r}")
         raise RuntimeError(err)
+    mp4_edit_log(f"crop_and_trim ok dest={dest} size={dest.stat().st_size} ({elapsed:.1f}s)")
     return dest
 
 

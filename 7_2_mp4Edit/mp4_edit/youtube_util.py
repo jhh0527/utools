@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from mp4_edit.ffmpeg_util import ffmpeg_bin, trim_stream_to_file
+from mp4_edit.log_util import mp4_edit_log, mp4_edit_log_exc
 from mp4_edit.paths import default_output_dir
 
 _YT_RE = re.compile(
@@ -57,35 +59,17 @@ def _base_opts(*, quiet: bool = True) -> dict:
         "merge_output_format": "mp4",
         "quiet": quiet,
         "no_warnings": quiet,
+        "socket_timeout": 20,
+        "retries": 2,
+        "fragment_retries": 2,
+        "extractor_retries": 2,
     }
     if ff:
         opts["ffmpeg_location"] = str(ff.parent)
     return opts
 
 
-def cached_download_path(url: str) -> Path | None:
-    vid = youtube_video_id(url)
-    if not vid:
-        return None
-    dest_dir = default_output_dir()
-    for ext in (".mp4", ".webm", ".mkv", ".m4v"):
-        p = dest_dir / f"{vid}{ext}"
-        if p.is_file() and p.stat().st_size >= 512:
-            return p
-    return None
-
-
-def fetch_youtube_meta(url: str) -> YoutubeMeta:
-    """전체 다운로드 없이 길이·해상도 등 메타만 조회."""
-    yt_dlp = _require_ytdlp()
-    url = normalize_youtube_url(url)
-    vid = youtube_video_id(url)
-    if not vid:
-        raise ValueError("YouTube URL 을 인식할 수 없습니다.")
-    with yt_dlp.YoutubeDL(_base_opts()) as ydl:
-        info = ydl.extract_info(url, download=False)
-    if not info:
-        raise RuntimeError("YouTube 영상 정보를 가져오지 못했습니다.")
+def _meta_from_info(info: dict, *, vid: str) -> YoutubeMeta:
     dur = float(info.get("duration") or 0.0)
     if dur <= 0:
         raise RuntimeError("YouTube 영상 길이를 알 수 없습니다.")
@@ -107,16 +91,7 @@ def fetch_youtube_meta(url: str) -> YoutubeMeta:
     )
 
 
-def get_youtube_stream_url(url: str) -> str:
-    """미리보기 프레임 추출용 직접 URL (짧은 수명)."""
-    yt_dlp = _require_ytdlp()
-    url = normalize_youtube_url(url)
-    opts = _base_opts()
-    opts["format"] = "best[ext=mp4]/best"
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-    if not info:
-        raise RuntimeError("YouTube 스트림 URL 을 가져오지 못했습니다.")
+def _stream_url_from_info(info: dict) -> str:
     direct = info.get("url")
     if direct:
         return str(direct)
@@ -124,6 +99,63 @@ def get_youtube_stream_url(url: str) -> str:
         if fmt.get("url") and fmt.get("vcodec") not in (None, "none"):
             return str(fmt["url"])
     raise RuntimeError("YouTube 스트림 URL 을 찾을 수 없습니다.")
+
+
+def _extract_youtube_info(url: str, *, format_selector: str | None = None) -> dict:
+    yt_dlp = _require_ytdlp()
+    url = normalize_youtube_url(url)
+    vid = youtube_video_id(url)
+    if not vid:
+        raise ValueError("YouTube URL 을 인식할 수 없습니다.")
+    opts = _base_opts()
+    if format_selector:
+        opts["format"] = format_selector
+    mp4_edit_log(f"yt-dlp extract_info start vid={vid} format={format_selector or '(default)'}")
+    t0 = time.monotonic()
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as e:
+        mp4_edit_log_exc(f"yt-dlp extract_info FAIL vid={vid} ({time.monotonic() - t0:.1f}s)", e)
+        msg = str(e).strip() or "YouTube 정보 조회 실패"
+        raise RuntimeError(msg) from e
+    elapsed = time.monotonic() - t0
+    if not info:
+        mp4_edit_log(f"yt-dlp extract_info empty vid={vid} ({elapsed:.1f}s)")
+        raise RuntimeError("YouTube 영상 정보를 가져오지 못했습니다.")
+    mp4_edit_log(
+        f"yt-dlp extract_info ok vid={vid} dur={info.get('duration')} "
+        f"title={str(info.get('title') or '')[:60]!r} ({elapsed:.1f}s)"
+    )
+    return info
+
+
+def cached_download_path(url: str) -> Path | None:
+    vid = youtube_video_id(url)
+    if not vid:
+        return None
+    dest_dir = default_output_dir()
+    for ext in (".mp4", ".webm", ".mkv", ".m4v"):
+        p = dest_dir / f"{vid}{ext}"
+        if p.is_file() and p.stat().st_size >= 512:
+            return p
+    return None
+
+
+def fetch_youtube_meta(url: str) -> YoutubeMeta:
+    """전체 다운로드 없이 길이·해상도 등 메타만 조회."""
+    url = normalize_youtube_url(url)
+    vid = youtube_video_id(url)
+    if not vid:
+        raise ValueError("YouTube URL 을 인식할 수 없습니다.")
+    info = _extract_youtube_info(url)
+    return _meta_from_info(info, vid=vid)
+
+
+def get_youtube_stream_url(url: str) -> str:
+    """미리보기 프레임 추출용 직접 URL (짧은 수명)."""
+    info = _extract_youtube_info(url, format_selector="best[ext=mp4]/best")
+    return _stream_url_from_info(info)
 
 
 def download_youtube(
@@ -159,8 +191,15 @@ def download_youtube_section(
         raise ValueError("YouTube URL 을 인식할 수 없습니다.")
 
     start_sec = max(0.0, float(start_sec))
-    meta = fetch_youtube_meta(url)
+    mp4_edit_log(
+        f"download_youtube_section start vid={vid} start={start_sec} end={end_sec} dest={dest}"
+    )
+    if on_status:
+        on_status("YouTube 정보 조회 중…")
+    info = _extract_youtube_info(url, format_selector="best[ext=mp4]/best")
+    meta = _meta_from_info(info, vid=vid)
     clip_end = float(end_sec) if end_sec is not None else meta.duration
+    mp4_edit_log(f"download_youtube_section meta ok clip_end={clip_end}")
     if clip_end <= start_sec:
         raise ValueError("종료 시점은 시작 시점보다 뒤여야 합니다.")
 
@@ -233,6 +272,7 @@ def download_youtube_section(
         out_path = Path(dest)
         if not out_path.suffix:
             out_path = out_path.with_suffix(".mp4")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
     else:
         tag = f"{vid}_{int(start_sec)}_{int(clip_end)}"
         out_path = out_dir / f"{tag}.mp4"
@@ -240,12 +280,26 @@ def download_youtube_section(
     # yt-dlp download_ranges 는 일부 영상에서 무한 대기 → ffmpeg 스트림 구간 추출
     if on_status:
         on_status("YouTube 스트림 연결 중…")
-    stream = get_youtube_stream_url(url)
+    stream = _stream_url_from_info(info)
+    mp4_edit_log(f"download_youtube_section stream url len={len(stream)} host={stream[:80]!r}…")
     if on_status:
         on_status("구간 추출·저장 중…")
-    return trim_stream_to_file(
-        stream,
-        out_path,
-        start_sec=start_sec,
-        end_sec=clip_end,
+    t0 = time.monotonic()
+    try:
+        out = trim_stream_to_file(
+            stream,
+            out_path,
+            start_sec=start_sec,
+            end_sec=clip_end,
+            timeout=180,
+        )
+    except Exception as e:
+        mp4_edit_log_exc(
+            f"trim_stream_to_file FAIL dest={out_path} ({time.monotonic() - t0:.1f}s)",
+            e,
+        )
+        raise
+    mp4_edit_log(
+        f"download_youtube_section done dest={out} size={out.stat().st_size} ({time.monotonic() - t0:.1f}s)"
     )
+    return out

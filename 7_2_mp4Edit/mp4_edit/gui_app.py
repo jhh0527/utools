@@ -15,11 +15,13 @@ from mp4_edit.ffmpeg_util import (
     crop_and_trim,
     extract_frame_png,
     extract_frame_png_from_url,
+    ffmpeg_bin,
     probe_duration,
     probe_video_size,
     resolve_edit_dest,
     temp_preview_png,
 )
+from mp4_edit.log_util import log_file_display, mp4_edit_log, mp4_edit_log_exc
 from mp4_edit.paths import default_output_dir
 from mp4_edit.settings import load_gui_settings, save_gui_settings
 from mp4_edit.youtube_util import (
@@ -27,6 +29,7 @@ from mp4_edit.youtube_util import (
     fetch_youtube_meta,
     get_youtube_stream_url,
     is_youtube_url,
+    normalize_youtube_url,
     youtube_video_id,
 )
 from wisdom_workspace import folder_dialog_initial, touch_workspace_from_path
@@ -87,6 +90,7 @@ def main(*, container: tk.Misc | None = None) -> None:
     )
 
     cfg = load_gui_settings()
+    mp4_edit_log(f"=== 7_2 mp4Edit {__version__} 시작 log={log_file_display()} ===")
     root, standalone = tk_host(container)
     configure_notebook_tabs(root)
     apply_window_chrome(
@@ -139,6 +143,8 @@ def main(*, container: tk.Misc | None = None) -> None:
         "start_line": None,
         "end_line": None,
         "busy": False,
+        "loading": False,
+        "load_token": 0,
         "preview_job": None,
     }
 
@@ -158,11 +164,50 @@ def main(*, container: tk.Misc | None = None) -> None:
     mp4_ent.grid(row=0, column=1, sticky="ew", padx=(4, 6))
 
     btn_load = ttk.Button(path_fr, text="불러오기")
+    btn_cancel_load = ttk.Button(path_fr, text="불러오기 취소", state=tk.DISABLED)
+
+    def update_action_buttons() -> None:
+        loading = bool(state.get("loading"))
+        busy = bool(state.get("busy"))
+        locked = loading or busy
+        btn_load.configure(state=tk.DISABLED if locked else tk.NORMAL)
+        btn_cancel_load.configure(state=tk.NORMAL if loading else tk.DISABLED)
+        btn_crop.configure(state=tk.DISABLED if locked else tk.NORMAL)
 
     def set_busy(busy: bool) -> None:
         state["busy"] = busy
-        btn_crop.configure(state=tk.DISABLED if busy else tk.NORMAL)
-        btn_load.configure(state=tk.DISABLED if busy else tk.NORMAL)
+        update_action_buttons()
+
+    def _load_cancelled(token: int) -> bool:
+        return token != state.get("load_token", 0)
+
+    def begin_load() -> int:
+        state["load_token"] = state.get("load_token", 0) + 1
+        state["loading"] = True
+        update_action_buttons()
+        return state["load_token"]
+
+    def end_load(token: int) -> bool:
+        cancelled = _load_cancelled(token)
+        state["loading"] = False
+        update_action_buttons()
+        return cancelled
+
+    def cancel_load() -> None:
+        if not state.get("loading"):
+            return
+        mp4_edit_log("load cancel requested")
+        state["load_token"] = state.get("load_token", 0) + 1
+        state["loading"] = False
+        job = state.get("preview_job")
+        if job is not None:
+            try:
+                root.after_cancel(job)
+            except tk.TclError:
+                pass
+            state["preview_job"] = None
+        update_action_buttons()
+        status_var.set("불러오기 취소됨")
 
     def pick_mp4() -> None:
         init = Path(mp4_var.get().strip()) if mp4_var.get().strip() else Path.home()
@@ -177,7 +222,9 @@ def main(*, container: tk.Misc | None = None) -> None:
             resolve_and_load(str(p))
 
     ttk.Button(path_fr, text="찾기…", command=pick_mp4).grid(row=0, column=2, padx=(0, 6))
-    btn_load.grid(row=0, column=3)
+    btn_load.grid(row=0, column=3, padx=(0, 6))
+    btn_cancel_load.grid(row=0, column=4)
+    btn_cancel_load.configure(command=cancel_load)
 
     save_fr = ttk.Frame(frm)
     save_fr.grid(row=1, column=0, sticky="ew", pady=(0, 6))
@@ -417,7 +464,19 @@ def main(*, container: tk.Misc | None = None) -> None:
                     oy + (y + h) * s,
                 )
         except Exception as e:
+            mp4_edit_log_exc(f"preview FAIL t={time_sec}", e)
             status_var.set(str(e))
+
+    def set_status(msg: str, *, tag: str = "") -> None:
+        if tag:
+            mp4_edit_log(f"status[{tag}]: {msg}")
+        else:
+            mp4_edit_log(f"status: {msg}")
+        status_var.set(msg)
+
+    def crop_status(msg: str) -> None:
+        mp4_edit_log(f"crop status callback: {msg}")
+        safe_after(root, lambda m=msg: status_var.set(m))
 
     def schedule_preview(time_sec: float) -> None:
         job = state.get("preview_job")
@@ -440,7 +499,7 @@ def main(*, container: tk.Misc | None = None) -> None:
 
     seek_scale.configure(command=on_seek)
 
-    def _apply_output_dir_from_ui() -> Path:
+    def _apply_output_dir_from_ui(source_path: Path | None = None) -> Path:
         raw = out_dir_var.get().strip()
         if raw:
             p = Path(raw)
@@ -448,18 +507,17 @@ def main(*, container: tk.Misc | None = None) -> None:
             return p
         if state.get("path"):
             return state["path"].parent
+        if source_path is not None and source_path.is_file():
+            return source_path.parent
         return default_output_dir()
 
-    def load_video(path: Path, *, source_text: str | None = None) -> None:
-        path = Path(path)
-        if not path.is_file():
-            safe_messagebox(root, "showerror", "7_2 mp4Edit", f"파일 없음:\n{path}")
-            return
-        dur = probe_duration(path)
-        if dur is None or dur <= 0:
-            safe_messagebox(root, "showerror", "7_2 mp4Edit", "영상 길이를 읽을 수 없습니다 (ffprobe).")
-            return
-        size = probe_video_size(path) or (0, 0)
+    def _apply_loaded_video(
+        path: Path,
+        *,
+        dur: float,
+        size: tuple[int, int],
+        source_text: str | None = None,
+    ) -> None:
         touch_workspace_from_path(path)
         src_label = source_text or str(path)
         mp4_var.set(src_label)
@@ -490,6 +548,18 @@ def main(*, container: tk.Misc | None = None) -> None:
         status_var.set(f"로드: {path.name} ({_fmt_time(dur)}, {size[0]}×{size[1]})")
         schedule_preview(0.0)
 
+    def load_video(path: Path, *, source_text: str | None = None) -> None:
+        path = Path(path)
+        if not path.is_file():
+            safe_messagebox(root, "showerror", "7_2 mp4Edit", f"파일 없음:\n{path}")
+            return
+        dur = probe_duration(path)
+        if dur is None or dur <= 0:
+            safe_messagebox(root, "showerror", "7_2 mp4Edit", "영상 길이를 읽을 수 없습니다 (ffprobe).")
+            return
+        size = probe_video_size(path) or (0, 0)
+        _apply_loaded_video(path, dur=dur, size=size, source_text=source_text)
+
     def load_youtube(url: str, *, source_text: str | None = None) -> None:
         src_label = source_text or url
         mp4_var.set(src_label)
@@ -517,22 +587,35 @@ def main(*, container: tk.Misc | None = None) -> None:
 
     def resolve_and_load(text: str) -> None:
         raw = (text or "").strip()
+        mp4_edit_log(f"resolve_and_load: {raw[:120]!r}")
         if not raw:
             safe_messagebox(root, "showwarning", "7_2 mp4Edit", "MP4 파일 또는 YouTube URL 을 입력하세요.")
             return
-        if state["busy"]:
+        if state.get("loading") or state.get("busy"):
             return
+        token = begin_load()
         if is_youtube_url(raw):
-            set_busy(True)
-            status_var.set("YouTube 정보 조회 중…")
+            set_status("YouTube 정보 조회 중…", tag="load")
 
             def work() -> None:
                 try:
+                    mp4_edit_log(f"load youtube worker start token={token}")
+                    if _load_cancelled(token):
+                        mp4_edit_log(f"load youtube cancelled before meta token={token}")
+                        return
                     meta = fetch_youtube_meta(raw)
+                    if _load_cancelled(token):
+                        safe_after(root, lambda t=token: end_load(t))
+                        return
                     url = raw
 
                     def ok() -> None:
-                        set_busy(False)
+                        if end_load(token):
+                            mp4_edit_log(f"load youtube ok skipped (cancelled) token={token}")
+                            return
+                        mp4_edit_log(
+                            f"load youtube ok dur={meta.duration} {meta.width}x{meta.height} token={token}"
+                        )
                         state["duration"] = meta.duration
                         state["video_w"] = meta.width
                         state["video_h"] = meta.height
@@ -542,11 +625,18 @@ def main(*, container: tk.Misc | None = None) -> None:
 
                     safe_after(root, ok)
                 except Exception as e:
+                    mp4_edit_log_exc(f"load youtube worker FAIL token={token}", e)
 
                     def fail() -> None:
-                        set_busy(False)
-                        status_var.set(str(e))
-                        safe_messagebox(root, "showerror", "7_2 mp4Edit", str(e))
+                        if end_load(token):
+                            return
+                        set_status(str(e), tag="load")
+                        safe_messagebox(
+                            root,
+                            "showerror",
+                            "7_2 mp4Edit",
+                            f"{e}\n\n로그:\n{log_file_display()}",
+                        )
 
                     safe_after(root, fail)
 
@@ -554,9 +644,50 @@ def main(*, container: tk.Misc | None = None) -> None:
             return
         path = Path(raw)
         if not path.is_file():
+            end_load(token)
             safe_messagebox(root, "showerror", "7_2 mp4Edit", f"파일을 찾을 수 없습니다:\n{raw}")
             return
-        load_video(path, source_text=raw)
+        set_status("영상 분석 중…", tag="load")
+
+        def work_local() -> None:
+            try:
+                mp4_edit_log(f"load local worker start path={path} token={token}")
+                if _load_cancelled(token):
+                    return
+                dur = probe_duration(path)
+                if _load_cancelled(token):
+                    safe_after(root, lambda t=token: end_load(t))
+                    return
+                if dur is None or dur <= 0:
+                    raise RuntimeError("영상 길이를 읽을 수 없습니다 (ffprobe).")
+                size = probe_video_size(path) or (0, 0)
+                if _load_cancelled(token):
+                    safe_after(root, lambda t=token: end_load(t))
+                    return
+
+                def ok() -> None:
+                    if end_load(token):
+                        return
+                    _apply_loaded_video(path, dur=dur, size=size, source_text=raw)
+
+                safe_after(root, ok)
+            except Exception as e:
+                mp4_edit_log_exc(f"load local worker FAIL token={token}", e)
+
+                def fail() -> None:
+                    if end_load(token):
+                        return
+                    set_status(str(e), tag="load")
+                    safe_messagebox(
+                        root,
+                        "showerror",
+                        "7_2 mp4Edit",
+                        f"{e}\n\n로그:\n{log_file_display()}",
+                    )
+
+                safe_after(root, fail)
+
+        threading.Thread(target=work_local, daemon=True).start()
 
     def on_load_click() -> None:
         resolve_and_load(mp4_var.get())
@@ -623,15 +754,48 @@ def main(*, container: tk.Misc | None = None) -> None:
     btn_reset_end.configure(command=reset_end)
     btn_reset_crop.configure(command=clear_crop_visual)
 
+    def _cut_times_from_entries() -> tuple[float, float | None]:
+        start = _parse_sec(start_entry_var.get())
+        if start is None:
+            start = state.get("start_sec", 0.0)
+        end_raw = end_entry_var.get().strip()
+        if not end_raw:
+            return start, None
+        end = _parse_sec(end_raw)
+        if end is None:
+            return start, state.get("end_sec")
+        return start, end
+
     def do_crop() -> None:
-        path: Path | None = state.get("path")
-        yt_url: str | None = state.get("youtube_url")
-        if path is None and not yt_url:
-            safe_messagebox(root, "showwarning", "7_2 mp4Edit", "영상을 먼저 불러오세요.")
+        raw = mp4_var.get().strip()
+        mp4_edit_log(f"do_crop start: {raw[:120]!r}")
+        if not raw:
+            safe_messagebox(root, "showwarning", "7_2 mp4Edit", "MP4 파일 또는 YouTube URL 을 입력하세요.")
             return
-        apply_time_entries_to_state()
-        out_base = _apply_output_dir_from_ui()
-        stem = state.get("youtube_id") or (path.stem if path else "output")
+
+        path: Path | None = None
+        yt_url: str | None = None
+        if is_youtube_url(raw):
+            yt_url = normalize_youtube_url(raw)
+            stem = youtube_video_id(yt_url) or "output"
+        else:
+            path = Path(raw)
+            if not path.is_file():
+                safe_messagebox(root, "showerror", "7_2 mp4Edit", f"파일을 찾을 수 없습니다:\n{raw}")
+                return
+            stem = path.stem
+            touch_workspace_from_path(path)
+
+        loaded_match = (
+            path is not None
+            and state.get("path") == path
+            or yt_url is not None
+            and state.get("youtube_url") == yt_url
+        )
+        if loaded_match:
+            apply_time_entries_to_state()
+
+        out_base = _apply_output_dir_from_ui(path)
         src_for_name = path or Path(stem + ".mp4")
         dest = resolve_edit_dest(
             src_for_name,
@@ -639,15 +803,40 @@ def main(*, container: tk.Misc | None = None) -> None:
             output_name=out_name_var.get().strip() or None,
             default_stem=stem,
         )
-        start = state["start_sec"]
-        end = state["end_sec"]
-        crop = state["crop"]
+        start, end = _cut_times_from_entries() if not loaded_match else (state["start_sec"], state["end_sec"])
+        crop = state.get("crop") if loaded_match else None
+        mp4_edit_log(
+            f"do_crop dest={dest} start={start} end={end} crop={crop} "
+            f"yt={yt_url is not None} path={path}"
+        )
+        save_gui_settings(
+            mp4_path=raw,
+            output_dir=out_dir_var.get().strip(),
+            output_name=out_name_var.get().strip(),
+            start_sec=start_entry_var.get().strip(),
+            end_sec=end_entry_var.get().strip(),
+        )
+        if not ffmpeg_bin():
+            safe_messagebox(
+                root,
+                "showerror",
+                "7_2 mp4Edit",
+                "ffmpeg 를 찾을 수 없습니다.\n\n"
+                "wisdom/tools/ffmpeg/bin 에 ffmpeg.exe·ffprobe.exe 를 두거나\n"
+                "시스템 PATH 에 ffmpeg 를 설치하세요.",
+            )
+            return
         set_busy(True)
-        status_var.set("저장 중…")
+        if yt_url:
+            set_status("YouTube 준비 중…", tag="crop")
+        else:
+            set_status("저장 중…", tag="crop")
 
         def work() -> None:
             try:
+                mp4_edit_log("do_crop worker thread started")
                 if path is not None and path.is_file():
+                    crop_status("ffmpeg 자르기 중…")
                     crop_and_trim(
                         path,
                         dest,
@@ -656,13 +845,14 @@ def main(*, container: tk.Misc | None = None) -> None:
                         crop_rect=crop,
                     )
                 else:
+                    crop_status("YouTube 정보 조회 중…")
                     tmp = dest.with_name(dest.stem + "_dl" + dest.suffix) if crop else dest
                     work_path = download_youtube_section(
                         yt_url,
                         start_sec=start,
                         end_sec=end,
                         dest=tmp,
-                        on_status=lambda msg: safe_after(root, lambda m=msg: status_var.set(m)),
+                        on_status=crop_status,
                     )
                     if crop is not None:
                         crop_and_trim(
@@ -680,16 +870,23 @@ def main(*, container: tk.Misc | None = None) -> None:
 
                 def ok() -> None:
                     set_busy(False)
-                    status_var.set(f"저장 완료: {dest.name}")
+                    mp4_edit_log(f"do_crop ok dest={dest}")
+                    set_status(f"저장 완료: {dest.name}", tag="crop")
                     safe_messagebox(root, "showinfo", "7_2 mp4Edit", f"저장했습니다.\n\n{dest}")
 
                 safe_after(root, ok)
             except Exception as e:
+                mp4_edit_log_exc("do_crop worker FAIL", e)
 
                 def fail() -> None:
                     set_busy(False)
-                    status_var.set(str(e))
-                    safe_messagebox(root, "showerror", "7_2 mp4Edit", str(e))
+                    set_status(str(e), tag="crop")
+                    safe_messagebox(
+                        root,
+                        "showerror",
+                        "7_2 mp4Edit",
+                        f"{e}\n\n로그:\n{log_file_display()}",
+                    )
 
                 safe_after(root, fail)
 

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import queue
+import weakref
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Literal
@@ -12,6 +14,8 @@ from tkinter import font as tkfont, messagebox, ttk
 
 _hub_shutting_down = False
 _drop_hooked: set[int] = set()
+_ui_queues: weakref.WeakKeyDictionary[tk.Misc, queue.Queue[Callable[[], None]]] = weakref.WeakKeyDictionary()
+_ui_pump_hosts: weakref.WeakKeyDictionary[tk.Misc, bool] = weakref.WeakKeyDictionary()
 
 PathDropMode = Literal["dir", "file", "path"]
 
@@ -30,8 +34,53 @@ def ui_alive(root: tk.Misc, *, closing: bool = False) -> bool:
         return False
 
 
+def _ui_toplevel(root: tk.Misc) -> tk.Misc:
+    try:
+        return root.winfo_toplevel()
+    except tk.TclError:
+        return root
+
+
+def _ensure_ui_pump(root: tk.Misc) -> queue.Queue[Callable[[], None]]:
+    host = _ui_toplevel(root)
+    q = _ui_queues.get(host)
+    if q is None:
+        q = queue.Queue()
+        _ui_queues[host] = q
+
+    if _ui_pump_hosts.get(host):
+        return q
+
+    def pump() -> None:
+        if not ui_alive(host):
+            return
+        try:
+            while True:
+                fn = _ui_queues[host].get_nowait()
+                try:
+                    if ui_alive(host):
+                        fn()
+                except tk.TclError:
+                    pass
+        except queue.Empty:
+            pass
+        except (KeyError, tk.TclError):
+            return
+        try:
+            host.after(50, pump)
+        except tk.TclError:
+            pass
+
+    _ui_pump_hosts[host] = True
+    try:
+        host.after(50, pump)
+    except tk.TclError:
+        _ui_pump_hosts.pop(host, None)
+    return q
+
+
 def safe_after(root: tk.Misc, fn: Callable[[], None], *, closing: bool = False) -> None:
-    """``after(0, …)`` — 허브 종료 후 새 Tk 창이 뜨지 않도록 보호합니다."""
+    """worker 스레드에서도 안전한 UI 콜백 — 메인 루프 큐로 전달."""
 
     def wrapper() -> None:
         if not ui_alive(root, closing=closing):
@@ -41,12 +90,13 @@ def safe_after(root: tk.Misc, fn: Callable[[], None], *, closing: bool = False) 
         except tk.TclError:
             pass
 
-    if not ui_alive(root, closing=closing):
-        return
     try:
-        root.after(0, wrapper)
-    except tk.TclError:
-        pass
+        _ensure_ui_pump(root).put(wrapper)
+    except Exception:
+        try:
+            _ui_toplevel(root).after(0, wrapper)
+        except tk.TclError:
+            pass
 
 
 def safe_messagebox(
