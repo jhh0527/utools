@@ -352,3 +352,24 @@ def crop_and_trim(
 
 def temp_preview_png() -> Path:
     return Path(tempfile.gettempdir()) / f"mp4_edit_preview_{os.getpid()}.png"
+
+
+def temp_timeline_dir() -> Path:
+    d = Path(tempfile.gettempdir()) / f"mp4_edit_tl_{os.getpid()}"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def extract_timeline_frame(
+    *,
+    path: Path | None,
+    stream_url: str | None,
+    time_sec: float,
+    dest: Path,
+) -> Path:
+    """타임라인 썸네일용 단일 프레임 추출 (로컬 파일 또는 HTTP 스트림)."""
+    if path is not None and path.is_file():
+        return extract_frame_png(path, time_sec, dest)
+    if stream_url:
+        return extract_frame_png_from_url(stream_url, time_sec, dest)
+    raise RuntimeError("썸네일 추출에 영상 소스가 없습니다.")

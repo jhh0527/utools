@@ -25,6 +25,7 @@ class TimelineComposeJob:
     is_gap: bool = False
     is_hold: bool = False
     is_image_only: bool = False
+    video_loop: bool = True
 
 
 def merge_asset_maps(
@@ -450,13 +451,24 @@ def list_timeline_compose_jobs(
     extra_mp4: dict[int, Path] | None = None,
     extra_png: dict[int, Path] | None = None,
     png_effects: dict[int, str] | None = None,
+    mp4_play_modes: dict[int, str] | None = None,
     asset_start_times: dict[int, float] | None = None,
 ) -> list[TimelineComposeJob]:
     """타임라인 자산 변경 지점마다 하나의 클립 — 다음 MP4·PNG 전까지 유지.
 
     - ``SRT_NNN`` 번호 = 파일명, 시작 시각 = SRT 타임스탬프(``asset_start_times``)
     - 구간 길이 = 다음 자산 시작(또는 SRT 끝) − 시작
+    - ``mp4_play_modes``: 파일 번호별 반복(``loop``) / 마지막 장면 유지(``hold``)
     """
+    from mp4_search.mp4_play_modes import MP4_MODE_LOOP, normalize_mp4_play_mode
+
+    def _video_loop_for(key: int) -> bool:
+        return (
+            normalize_mp4_play_mode(
+                (mp4_play_modes or {}).get(int(key), MP4_MODE_LOOP)
+            )
+            == MP4_MODE_LOOP
+        )
     mp4_map, png_map = merge_asset_maps(
         *scan_srt_assets(folder),
         extra_mp4=extra_mp4,
@@ -568,6 +580,7 @@ def list_timeline_compose_jobs(
                 image_from=img_key,
                 video_start_sec=video_start,
                 image_effect=img_effect,
+                video_loop=_video_loop_for(vid_key),
             )
         )
         prev_vid_key = vid_key
@@ -575,6 +588,55 @@ def list_timeline_compose_jobs(
         last_video = video
         last_vid_key = vid_key
     return jobs
+
+
+def _same_compose_image_path(a: Path | None, b: Path | None) -> bool:
+    if a is None or b is None:
+        return False
+    try:
+        return a.resolve() == b.resolve()
+    except OSError:
+        return a == b
+
+
+def image_motion_span_phase_for_jobs(
+    jobs: list[TimelineComposeJob],
+) -> list[tuple[float | None, float | None]]:
+    """같은 PNG·같은 줌 효과가 이어지는 구간 — 클립마다 효과가 처음부터 반복되지 않게."""
+    from mp4_search.image_effects import PNG_EFFECT_FIXED, normalize_png_effect
+
+    n = len(jobs)
+    out: list[tuple[float | None, float | None]] = [(None, None)] * n
+    i = 0
+    while i < n:
+        job = jobs[i]
+        img = job.image
+        eff = normalize_png_effect(getattr(job, "image_effect", "fixed"))
+        if img is None or not img.is_file() or eff == PNG_EFFECT_FIXED or job.is_gap:
+            out[i] = (None, None)
+            i += 1
+            continue
+        j = i
+        run_start = float(job.mark_sec)
+        while j + 1 < n:
+            nxt = jobs[j + 1]
+            nxt_eff = normalize_png_effect(getattr(nxt, "image_effect", "fixed"))
+            if (
+                not nxt.is_gap
+                and nxt.image is not None
+                and _same_compose_image_path(nxt.image, img)
+                and nxt_eff == eff
+            ):
+                j += 1
+            else:
+                break
+        span = sum(float(jobs[k].duration_sec) for k in range(i, j + 1))
+        span = max(span, 1e-6)
+        for k in range(i, j + 1):
+            phase = max(0.0, float(jobs[k].mark_sec) - run_start)
+            out[k] = (span, phase)
+        i = j + 1
+    return out
 
 
 def format_jobs_timeline_summary(
@@ -592,7 +654,13 @@ def format_jobs_timeline_summary(
         elif j.is_image_only and j.image:
             label = j.image.name
         elif j.video:
-            label = j.video.name + (" (정지)" if j.is_hold else "")
+            label = j.video.name
+            if j.is_hold:
+                label += " (정지)"
+            elif getattr(j, "video_loop", True):
+                label += " (반복)"
+            else:
+                label += " (유지)"
             if j.image:
                 label += f" + {j.image.name}"
         else:

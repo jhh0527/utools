@@ -49,16 +49,16 @@ def load_tab_ui(module: str, container: tk.Misc) -> None:
             from elsub.gui_app import main
 
             main(container=container)
+        elif module == "2_2_imgDown":
+            from img_down.gui_app import main
+
+            main(container=container)
         elif module == "3_1_pngFileName":
             from png_rename.gui_app import main
 
             main(container=container)
         elif module == "3_2_pngToJpg":
             from png2jpg.gui_app import main
-
-            main(container=container)
-        elif module == "4_1_video":
-            from scenevid.gui_app import main
 
             main(container=container)
         elif module == "4_2_ShortVideo":

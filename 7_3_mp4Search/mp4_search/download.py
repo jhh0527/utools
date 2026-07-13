@@ -96,8 +96,13 @@ def _start_cancel_watcher(
     return t
 
 
-def _video_only_encode_args(*, preset: str = "medium") -> list[str]:
-    return [
+def _video_only_encode_args(
+    *,
+    preset: str = "medium",
+    cfr_fps: int | None = None,
+    stillimage: bool = False,
+) -> list[str]:
+    args = [
         "-c:v",
         "libx264",
         "-preset",
@@ -106,9 +111,25 @@ def _video_only_encode_args(*, preset: str = "medium") -> list[str]:
         "20",
         "-pix_fmt",
         "yuv420p",
-        "-movflags",
-        "+faststart",
     ]
+    fps = max(1, int(cfr_fps or 0))
+    if stillimage and fps:
+        args.extend(
+            [
+                "-tune",
+                "stillimage",
+                "-g",
+                str(fps),
+                "-keyint_min",
+                str(fps),
+                "-sc_threshold",
+                "0",
+            ]
+        )
+    if cfr_fps:
+        args.extend(["-r", str(max(1, int(cfr_fps))), "-fps_mode", "cfr"])
+    args.extend(["-movflags", "+faststart"])
+    return args
 
 
 def _compatible_mp4_encode_args() -> list[str]:
@@ -671,12 +692,18 @@ def compose_image_only(
     *,
     duration_sec: float,
     image_effect: str = "fixed",
+    motion_span_sec: float | None = None,
+    motion_phase_sec: float | None = None,
     normalize_size: tuple[int, int] | None = None,
     cancel_event: threading.Event | None = None,
     on_progress: Callable[[float], None] | None = None,
 ) -> Path:
     """이미지만으로 타임라인 클립 생성 (검은 배경 + 이미지·줌 효과)."""
-    from mp4_search.image_effects import image_overlay_filters, normalize_png_effect
+    from mp4_search.image_effects import (
+        PNG_EFFECT_FIXED,
+        image_overlay_filters,
+        normalize_png_effect,
+    )
 
     image = Path(image)
     dest = Path(dest)
@@ -693,11 +720,26 @@ def compose_image_only(
         w, h = normalize_size
     else:
         w, h = resolve_compose_canvas_size(folder=dest.parent)
-    filters = image_overlay_filters(w, h, effect=effect, duration_sec=clip_dur, fps=_COMPOSE_FPS)
-    norm = _normalize_video_vf(w, h)
-    filters = [fc.replace("[vout]", "[vpre]") + f";[vpre]{norm}[vout]" for fc in filters]
+    use_zoom = effect != PNG_EFFECT_FIXED
+    filters = image_overlay_filters(
+        w,
+        h,
+        effect=effect,
+        duration_sec=clip_dur,
+        fps=_COMPOSE_FPS,
+        motion_span_sec=motion_span_sec,
+        motion_phase_sec=motion_phase_sec,
+    )
+    if effect == PNG_EFFECT_FIXED:
+        norm = _normalize_video_vf(w, h)
+        filters = [fc.replace("[vout]", "[vpre]") + f";[vpre]{norm}[vout]" for fc in filters]
     image_loop_args = _image_input_loop_args(image, clip_dur, effect=effect)
-    encode_preset = "veryfast" if clip_dur > 60 else "medium"
+    encode_preset = "veryfast" if (use_zoom or clip_dur > 60) else "medium"
+    encode_args = _video_only_encode_args(
+        preset=encode_preset,
+        cfr_fps=_COMPOSE_FPS if use_zoom else None,
+        stillimage=use_zoom,
+    )
     cancelled = False
     err_text = ""
     for fc in filters:
@@ -715,18 +757,15 @@ def compose_image_only(
             f"color=c=black:s={w}x{h}:r={_COMPOSE_FPS}",
         ]
         cmd.extend(image_loop_args)
+        cmd.extend(["-i", str(image)])
         cmd.extend(
             [
-                "-i",
-                str(image),
                 "-filter_complex",
                 fc,
                 "-map",
                 "[vout]",
                 "-an",
-                *_video_only_encode_args(preset=encode_preset),
-                "-movflags",
-                "+faststart",
+                *encode_args,
                 str(tmp),
             ]
         )
@@ -818,6 +857,84 @@ def compose_hold_video(
     raise RuntimeError((err_text or "정지 화면 생성 실패").strip()[:400])
 
 
+def compose_trim_then_hold(
+    src: Path,
+    dest: Path,
+    *,
+    duration_sec: float,
+    video_start_sec: float = 0.0,
+    normalize_size: tuple[int, int] | None = None,
+    cancel_event: threading.Event | None = None,
+    on_progress: Callable[[float], None] | None = None,
+) -> Path:
+    """짧은 MP4 — 1회 재생 후 마지막 프레임 유지로 구간 길이를 채움."""
+    src = Path(src)
+    dest = Path(dest)
+    if not src.is_file():
+        raise FileNotFoundError(f"영상 없음: {src}")
+    dur = max(0.1, float(duration_sec))
+    start_sec = max(0.0, float(video_start_sec))
+    src_dur = _probe_media_duration(src) or dur
+    avail = max(0.0, src_dur - start_sec)
+    if avail + 0.05 >= dur:
+        return trim_video(
+            src,
+            dest,
+            start_sec=start_sec,
+            end_sec=start_sec + dur,
+            force_encode=True,
+            normalize_size=normalize_size,
+            cancel_event=cancel_event,
+            on_progress=on_progress,
+        )
+
+    ff = _ffmpeg_bin()
+    if not ff:
+        raise RuntimeError("영상 합성에 ffmpeg 가 필요합니다 (tools/ffmpeg).")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    play = min(avail, dur)
+    pad_extra = max(0.0, dur - play)
+    vf_parts: list[str] = []
+    if start_sec > 0.01:
+        vf_parts.append(f"trim=start={start_sec:.3f}:duration={play:.3f},setpts=PTS-STARTPTS")
+    else:
+        vf_parts.append(f"trim=duration={play:.3f},setpts=PTS-STARTPTS")
+    if pad_extra > 0.01:
+        vf_parts.append(f"tpad=stop_mode=clone:stop_duration={pad_extra:.3f}")
+    if normalize_size:
+        vf_parts.append(_normalize_video_vf(*normalize_size))
+    vf = ",".join(vf_parts)
+    cmd = [
+        str(ff),
+        "-y",
+        "-progress",
+        "pipe:1",
+        "-nostats",
+        "-i",
+        str(src),
+        "-vf",
+        vf,
+        "-an",
+        *_video_only_encode_args(),
+        "-t",
+        f"{dur:.3f}",
+        str(dest),
+    ]
+    cancelled, err_text = _run_ffmpeg_compose(
+        cmd,
+        cancel_event=cancel_event,
+        duration_sec=dur,
+        on_progress=on_progress,
+    )
+    if dest.is_file() and dest.stat().st_size >= 512:
+        if cancelled:
+            raise ComposeStopped(dest, f"합성 중지 — {dest.name}")
+        return dest
+    if cancelled:
+        raise ComposeStopped(None, "합성이 중지되었습니다.")
+    raise RuntimeError((err_text or "마지막 장면 유지 합성 실패").strip()[:400])
+
+
 def _image_overlay_filter_candidates(video: Path) -> list[str]:
     size = _probe_video_size(video)
     if size:
@@ -829,12 +946,42 @@ def _image_overlay_filter_candidates(video: Path) -> list[str]:
             f"[1:v]scale={w}:{h}:force_original_aspect_ratio=decrease,"
             f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1[img];"
         )
-        return [base + img + "[base][img]overlay=0:0:format=auto,setsar=1[vout]"]
+        return [base + img + "[base][img]overlay=0:0:format=auto,setsar=1,format=yuv420p[vout]"]
     return [
         "[0:v][1:v]scale2ref=w=iw:h=ih:force_original_aspect_ratio=decrease,"
         "pad=iw:ih:(ow-iw)/2:(oh-ih)/2:color=black@0[ov][base];"
-        "[base][ov]overlay=0:0:format=auto[vout]",
+        "[base][ov]overlay=0:0:format=auto,format=yuv420p[vout]",
     ]
+
+
+def _ffmpeg_error_detail(err_text: str | None, fallback: str, *, max_len: int = 400) -> str:
+    """ffmpeg 로그에서 실제 오류 줄만 추출 (앞쪽 버전 배너 제외)."""
+    text = (err_text or fallback).strip()
+    if not text:
+        return fallback
+    for line in reversed(text.splitlines()):
+        s = line.strip()
+        if not s:
+            continue
+        low = s.lower()
+        if low.startswith("ffmpeg version") or low.startswith("built with") or low.startswith("configuration:"):
+            continue
+        if low.startswith("libav") and "/" in low:
+            continue
+        if s.startswith("[") or "error" in low or "unable" in low or "invalid" in low:
+            return s[:max_len]
+    return text[-max_len:] if len(text) > max_len else text
+
+
+def _flatten_ffmpeg_cmd(cmd: list) -> list[str]:
+    """ffmpeg 인자 — 중첩 list 가 섞이면 TypeError 나므로 1단계 펼침."""
+    flat: list[str] = []
+    for part in cmd:
+        if isinstance(part, (list, tuple)):
+            flat.extend(str(x) for x in part)
+        elif part is not None:
+            flat.append(str(part))
+    return flat
 
 
 def _run_ffmpeg_compose(
@@ -843,11 +990,16 @@ def _run_ffmpeg_compose(
     cancel_event: threading.Event | None,
     duration_sec: float | None = None,
     on_progress: Callable[[float], None] | None = None,
+    cwd: str | Path | None = None,
 ) -> tuple[bool, str]:
     """ffmpeg 실행. (취소 여부, stderr 텍스트)."""
+    cmd = _flatten_ffmpeg_cmd(cmd)
     if duration_sec and duration_sec > 0:
         out_path = cmd[-1]
         cmd = cmd[:-1] + ["-t", f"{duration_sec:.3f}", out_path]
+    popen_kw = _win_subprocess_flags()
+    if cwd is not None:
+        popen_kw["cwd"] = str(cwd)
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
@@ -857,7 +1009,7 @@ def _run_ffmpeg_compose(
         encoding="utf-8",
         errors="replace",
         bufsize=1,
-        **_win_subprocess_flags(),
+        **popen_kw,
     )
     _set_active_ffmpeg_proc(proc)
     watcher = _start_cancel_watcher(cancel_event, proc)
@@ -927,6 +1079,8 @@ def _video_loop_seek_args(
     video: Path,
     start_sec: float,
     duration_sec: float | None,
+    *,
+    video_loop: bool = True,
 ) -> tuple[float, list[str]]:
     """짧은 MP4 연속 재생 — 시작이 영상 길이를 넘으면 루프·시작 위치 보정."""
     start = max(0.0, float(start_sec))
@@ -936,7 +1090,7 @@ def _video_loop_seek_args(
         return start, []
     if start >= src_dur - 0.02:
         start = start % src_dur
-    loop = need > 0 and start + need > src_dur + 0.05
+    loop = bool(video_loop) and need > 0 and start + need > src_dur + 0.05
     return start, (["-stream_loop", "-1"] if loop else [])
 
 
@@ -1055,7 +1209,11 @@ def _image_input_loop_args(
     effect: str,
 ) -> list[str]:
     """오버레이 이미지 입력 — JPG/PNG는 정지, GIF는 애니메이션·긴 구간 루프."""
-    from mp4_search.image_effects import image_effect_needs_loop, normalize_png_effect
+    from mp4_search.image_effects import (
+        image_effect_needs_loop,
+        normalize_png_effect,
+        static_image_input_framerate,
+    )
 
     ext = image.suffix.lower()
     need = max(0.0, float(duration_sec or 0))
@@ -1065,7 +1223,7 @@ def _image_input_loop_args(
             return ["-stream_loop", "-1"]
         return []
     if image_effect_needs_loop(normalize_png_effect(effect)):
-        return ["-loop", "1"]
+        return ["-framerate", static_image_input_framerate(need), "-loop", "1"]
     if ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
         return ["-loop", "1"]
     return []
@@ -1079,12 +1237,16 @@ def _compose_video_image_encode(
     duration_sec: float | None = None,
     video_start_sec: float = 0.0,
     image_effect: str = "fixed",
+    motion_span_sec: float | None = None,
+    motion_phase_sec: float | None = None,
     normalize_size: tuple[int, int] | None = None,
     cancel_event: threading.Event | None = None,
     on_progress: Callable[[float], None] | None = None,
+    video_loop: bool = True,
 ) -> Path:
     """MP4 + 이미지 오버레이 — 단일 ffmpeg 인코딩."""
     from mp4_search.image_effects import (
+        PNG_EFFECT_FIXED,
         image_overlay_filters,
         normalize_png_effect,
     )
@@ -1110,15 +1272,31 @@ def _compose_video_image_encode(
     clip_dur = duration_sec
     if not clip_dur or clip_dur <= 0:
         clip_dur = _probe_media_duration(video) or 5.0
-    filters = image_overlay_filters(w, h, effect=effect, duration_sec=float(clip_dur), fps=30)
-    if normalize_size:
+    use_zoom = effect != PNG_EFFECT_FIXED
+    filters = image_overlay_filters(
+        w,
+        h,
+        effect=effect,
+        duration_sec=float(clip_dur),
+        fps=_COMPOSE_FPS,
+        motion_span_sec=motion_span_sec,
+        motion_phase_sec=motion_phase_sec,
+    )
+    if effect == PNG_EFFECT_FIXED and normalize_size:
         norm = _normalize_video_vf(w, h)
         filters = [fc.replace("[vout]", "[vpre]") + f";[vpre]{norm}[vout]" for fc in filters]
     cancelled = False
     err_text = ""
-    start_sec, video_loop_args = _video_loop_seek_args(video, video_start_sec, clip_dur)
+    start_sec, video_loop_args = _video_loop_seek_args(
+        video, video_start_sec, clip_dur, video_loop=video_loop
+    )
     image_loop_args = _image_input_loop_args(image, clip_dur, effect=effect)
-    encode_preset = "veryfast" if float(clip_dur) > 60 else "medium"
+    encode_preset = "veryfast" if (use_zoom or float(clip_dur) > 60) else "medium"
+    encode_args = _video_only_encode_args(
+        preset=encode_preset,
+        cfr_fps=_COMPOSE_FPS if use_zoom else None,
+        stillimage=use_zoom,
+    )
     for fc_idx, fc in enumerate(filters):
         if tmp.is_file():
             tmp.unlink(missing_ok=True)
@@ -1135,10 +1313,9 @@ def _compose_video_image_encode(
             cmd.extend(["-ss", f"{start_sec:.3f}"])
         cmd.extend(["-i", str(video)])
         cmd.extend(image_loop_args)
+        cmd.extend(["-i", str(image)])
         cmd.extend(
             [
-                "-i",
-                str(image),
                 "-filter_complex",
                 fc,
                 "-map",
@@ -1148,7 +1325,7 @@ def _compose_video_image_encode(
         if with_audio:
             cmd.extend(["-map", "0:a?"])
         if normalize_size:
-            cmd.extend(["-an", *_video_only_encode_args(preset=encode_preset)])
+            cmd.extend(["-an", *encode_args])
         else:
             cmd.extend(
                 [
@@ -1164,7 +1341,19 @@ def _compose_video_image_encode(
             )
             if with_audio:
                 cmd.extend(["-c:a", "aac", "-b:a", "192k"])
-        cmd.extend(["-movflags", "+faststart", str(tmp)])
+            if use_zoom:
+                cmd.extend(
+                    [
+                        "-r",
+                        str(_COMPOSE_FPS),
+                        "-fps_mode",
+                        "cfr",
+                        "-tune",
+                        "stillimage",
+                    ]
+                )
+            cmd.extend(["-movflags", "+faststart"])
+        cmd.append(str(tmp))
         cancelled, err_text = _run_ffmpeg_compose(
             cmd,
             cancel_event=cancel_event,
@@ -1202,10 +1391,13 @@ def compose_video_image(
     duration_sec: float | None = None,
     video_start_sec: float = 0.0,
     image_effect: str = "fixed",
+    motion_span_sec: float | None = None,
+    motion_phase_sec: float | None = None,
     normalize_size: tuple[int, int] | None = None,
     cancel_event: threading.Event | None = None,
     on_progress: Callable[[float], None] | None = None,
     is_hold: bool = False,
+    video_loop: bool = True,
 ) -> Path:
     """적용된 MP4 위에 이미지를 캔버스 전체에 맞춰 오버레이하여 합성 저장."""
     video = Path(video)
@@ -1214,58 +1406,90 @@ def compose_video_image(
     clip_dur = duration_sec
     if not clip_dur or clip_dur <= 0:
         clip_dur = _probe_media_duration(video) or 5.0
+    work_video = video
+    work_start = video_start_sec
+    if not is_hold and not video_loop:
+        src_dur = _probe_media_duration(video) or 0.0
+        avail = max(0.0, src_dur - max(0.0, float(video_start_sec)))
+        if avail + 0.05 < float(clip_dur):
+            held_tmp = dest.with_suffix(".hold.tmp.mp4")
+            try:
+                compose_trim_then_hold(
+                    video,
+                    held_tmp,
+                    duration_sec=float(clip_dur),
+                    video_start_sec=video_start_sec,
+                    normalize_size=normalize_size,
+                    cancel_event=cancel_event,
+                    on_progress=on_progress,
+                )
+                work_video = held_tmp
+                work_start = 0.0
+            finally:
+                pass
+    held_tmp = work_video if work_video != video else None
     tile_dur = _seamless_compose_tile_sec(
-        video,
+        work_video,
         image,
         duration_sec=float(clip_dur),
-        video_start_sec=video_start_sec,
+        video_start_sec=work_start,
         image_effect=image_effect,
         is_hold=is_hold,
     )
-    if tile_dur and float(clip_dur) > float(tile_dur) + 0.5:
-        tile_path = dest.with_suffix(".tile.tmp.mp4")
-        tile_weight = float(tile_dur) / float(clip_dur)
+    try:
+        if tile_dur and float(clip_dur) > float(tile_dur) + 0.5:
+            tile_path = dest.with_suffix(".tile.tmp.mp4")
+            tile_weight = float(tile_dur) / float(clip_dur)
 
-        def tile_progress(pct: float) -> None:
-            if on_progress:
-                on_progress(min(99.0, pct * tile_weight * 100.0))
+            def tile_progress(pct: float) -> None:
+                if on_progress:
+                    on_progress(min(99.0, pct * tile_weight * 100.0))
 
-        def extend_progress(pct: float) -> None:
-            if on_progress:
-                on_progress(min(99.9, tile_weight * 100.0 + pct * (1.0 - tile_weight)))
+            def extend_progress(pct: float) -> None:
+                if on_progress:
+                    on_progress(min(99.9, tile_weight * 100.0 + pct * (1.0 - tile_weight)))
 
-        try:
-            _compose_video_image_encode(
-                video,
-                image,
-                tile_path,
-                duration_sec=tile_dur,
-                video_start_sec=video_start_sec,
-                image_effect=image_effect,
-                normalize_size=normalize_size,
-                cancel_event=cancel_event,
-                on_progress=tile_progress,
-            )
-            return _extend_looped_video_copy(
-                tile_path,
-                dest,
-                float(clip_dur),
-                cancel_event=cancel_event,
-                on_progress=extend_progress,
-            )
-        finally:
-            tile_path.unlink(missing_ok=True)
-    return _compose_video_image_encode(
-        video,
-        image,
-        dest,
-        duration_sec=duration_sec,
-        video_start_sec=video_start_sec,
-        image_effect=image_effect,
-        normalize_size=normalize_size,
-        cancel_event=cancel_event,
-        on_progress=on_progress,
-    )
+            try:
+                _compose_video_image_encode(
+                    work_video,
+                    image,
+                    tile_path,
+                    duration_sec=tile_dur,
+                    video_start_sec=work_start,
+                    image_effect=image_effect,
+                    motion_span_sec=motion_span_sec,
+                    motion_phase_sec=motion_phase_sec,
+                    normalize_size=normalize_size,
+                    cancel_event=cancel_event,
+                    on_progress=tile_progress,
+                    video_loop=video_loop or work_video != video,
+                )
+                return _extend_looped_video_copy(
+                    tile_path,
+                    dest,
+                    float(clip_dur),
+                    cancel_event=cancel_event,
+                    on_progress=extend_progress,
+                )
+            finally:
+                tile_path.unlink(missing_ok=True)
+        return _compose_video_image_encode(
+            work_video,
+            image,
+            dest,
+            duration_sec=duration_sec,
+            video_start_sec=work_start,
+            image_effect=image_effect,
+            motion_span_sec=motion_span_sec,
+            motion_phase_sec=motion_phase_sec,
+            normalize_size=normalize_size,
+            cancel_event=cancel_event,
+            on_progress=on_progress,
+            video_loop=video_loop or work_video != video,
+        )
+    finally:
+        if held_tmp is not None and held_tmp.is_file():
+            held_tmp.unlink(missing_ok=True)
 
 
 def compose_timeline_clip(
@@ -1276,7 +1500,10 @@ def compose_timeline_clip(
     duration_sec: float | None = None,
     video_start_sec: float = 0.0,
     image_effect: str = "fixed",
+    motion_span_sec: float | None = None,
+    motion_phase_sec: float | None = None,
     is_hold: bool = False,
+    video_loop: bool = True,
     normalize_size: tuple[int, int] | None = None,
     cancel_event: threading.Event | None = None,
     on_progress: Callable[[float], None] | None = None,
@@ -1299,18 +1526,41 @@ def compose_timeline_clip(
             duration_sec=duration_sec,
             video_start_sec=video_start_sec,
             image_effect=image_effect,
+            motion_span_sec=motion_span_sec,
+            motion_phase_sec=motion_phase_sec,
+            is_hold=False,
+            video_loop=video_loop,
             normalize_size=normalize_size,
             cancel_event=cancel_event,
             on_progress=on_progress,
         )
     dur = duration_sec if duration_sec and duration_sec > 0 else None
     start_sec = max(0.0, float(video_start_sec))
-    loop_fill = False
     if dur:
         src_dur = _probe_media_duration(video)
         avail = (src_dur - start_sec) if src_dur else None
         if avail is not None and avail + 0.05 < dur:
-            loop_fill = True
+            if video_loop:
+                return trim_video(
+                    video,
+                    dest,
+                    start_sec=start_sec,
+                    end_sec=start_sec + dur,
+                    force_encode=True,
+                    loop_to_duration=True,
+                    normalize_size=normalize_size,
+                    cancel_event=cancel_event,
+                    on_progress=on_progress,
+                )
+            return compose_trim_then_hold(
+                video,
+                dest,
+                duration_sec=dur,
+                video_start_sec=start_sec,
+                normalize_size=normalize_size,
+                cancel_event=cancel_event,
+                on_progress=on_progress,
+            )
     end_sec = (start_sec + dur) if dur else None
     return trim_video(
         video,
@@ -1318,7 +1568,7 @@ def compose_timeline_clip(
         start_sec=start_sec,
         end_sec=end_sec,
         force_encode=True,
-        loop_to_duration=loop_fill,
+        loop_to_duration=False,
         normalize_size=normalize_size,
         cancel_event=cancel_event,
         on_progress=on_progress,
@@ -1618,13 +1868,22 @@ def format_compose_segment_log(job, idx: int, total: int) -> str:
     if job.video and job.video.is_file():
         vd = _probe_media_duration(job.video)
         vs = getattr(job, "video_start_sec", 0.0)
-        vloop, _ = _video_loop_seek_args(job.video, vs, job.duration_sec)
+        _start_adj, vloop_args = _video_loop_seek_args(
+            job.video,
+            vs,
+            job.duration_sec,
+            video_loop=getattr(job, "video_loop", True),
+        )
         tail = f" (원본 {vd:g}초)" if vd else ""
         lines.append(f"  MP4: {job.video.name}{tail}")
         if vs > 0.01:
             lines.append(f"  MP4 시작오프셋: {vs:g}초")
-        if vloop:
+        if vloop_args:
             lines.append("  MP4: 짧아서 루프(-stream_loop) 사용")
+        elif getattr(job, "video_loop", True) and vd and vs + job.duration_sec > vd + 0.05:
+            lines.append("  MP4: 짧아서 반복 재생")
+        elif vd and vs + job.duration_sec > vd + 0.05 and not job.is_hold:
+            lines.append("  MP4: 짧아서 마지막 장면 유지")
     tile_sec: float | None = None
     if job.image and job.image.is_file():
         ext = job.image.suffix.lower()
@@ -1678,10 +1937,10 @@ def _maybe_burn_segment_subtitles(
     burn_subtitles: bool,
     cancel_event: threading.Event | None = None,
     on_progress: Callable[[float], None] | None = None,
-) -> None:
-    """구간 클립에 SRT 자막 번인 (4_1_video 와 동일 subtitles 필터)."""
+) -> tuple[bool, str]:
+    """구간 클립에 SRT 자막 번인. (성공 여부, 실패 시 상세 메시지). 중지 시 ComposeStopped."""
     if not burn_subtitles or srt_path is None or not Path(srt_path).is_file():
-        return
+        return False, ""
     from mp4_search.subtitles import (
         stage_compose_font_for_work,
         subtitle_path_filter_arg,
@@ -1693,14 +1952,14 @@ def _maybe_burn_segment_subtitles(
     stage_compose_font_for_work(work_dir)
     seg_srt = work_dir / f"{clip_path.stem}.srt"
     if not write_timeline_segment_srt(seg_srt, Path(srt_path), start_sec, duration_sec):
-        return
+        return False, ""
     ff = _ffmpeg_bin()
     if not ff:
         raise RuntimeError("자막 번인에 ffmpeg 가 필요합니다 (tools/ffmpeg).")
     tmp = clip_path.with_suffix(".sub.tmp.mp4")
     if tmp.is_file():
         tmp.unlink(missing_ok=True)
-    sub_vf = subtitle_path_filter_arg(seg_srt, ffmpeg_cwd=work_dir, play_res=play_res)
+    sub_vf = f"format=yuv420p,{subtitle_path_filter_arg(seg_srt, ffmpeg_cwd=work_dir, play_res=play_res)}"
     cmd = [
         str(ff),
         "-y",
@@ -1722,16 +1981,17 @@ def _maybe_burn_segment_subtitles(
         cancel_event=cancel_event,
         duration_sec=duration_sec,
         on_progress=on_progress,
+        cwd=work_dir,
     )
     if tmp.is_file() and tmp.stat().st_size >= 512:
         tmp.replace(clip_path)
         if cancelled:
             raise ComposeStopped(clip_path, f"합성 중지 — {clip_path.name}")
-        return
+        return True, ""
     tmp.unlink(missing_ok=True)
     if cancelled:
         raise ComposeStopped(None, "합성이 중지되었습니다.")
-    raise RuntimeError((err_text or "자막 번인 실패").strip()[:400])
+    return False, _ffmpeg_error_detail(err_text, "자막 번인 실패")
 
 
 def compose_timeline_to_all_mp4(
@@ -1747,7 +2007,7 @@ def compose_timeline_to_all_mp4(
     on_log: ComposeLogFn | None = None,
 ) -> Path:
     """타임라인 구간 클립을 렌더한 뒤 ``all.mp4`` 로 연결."""
-    from mp4_search.timeline_compose import TimelineComposeJob
+    from mp4_search.timeline_compose import TimelineComposeJob, image_motion_span_phase_for_jobs
 
     if not jobs:
         raise ValueError("합성할 구간이 없습니다.")
@@ -1755,6 +2015,7 @@ def compose_timeline_to_all_mp4(
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     total = len(jobs)
+    motion_spans = image_motion_span_phase_for_jobs(jobs)
     segment_weight = 0.82 if audio_mp3 and Path(audio_mp3).is_file() else 0.88
     audio_weight = 0.06 if audio_mp3 and Path(audio_mp3).is_file() else 0.0
     concat_weight = 1.0 - segment_weight - audio_weight
@@ -1793,6 +2054,8 @@ def compose_timeline_to_all_mp4(
             raise TypeError("TimelineComposeJob 목록이 필요합니다.")
         clip_path = work_dir / f"seg_{idx:04d}.mp4"
         _log(format_compose_segment_log(job, idx, total))
+        mspan, mphase = motion_spans[idx - 1]
+        clip_done = False
         try:
             if job.is_gap or (not job.video and not job.image):
                 compose_black_pad(
@@ -1809,6 +2072,8 @@ def compose_timeline_to_all_mp4(
                     clip_path,
                     duration_sec=job.duration_sec,
                     image_effect=getattr(job, "image_effect", "fixed"),
+                    motion_span_sec=mspan,
+                    motion_phase_sec=mphase,
                     normalize_size=norm_size,
                     cancel_event=cancel_event,
                     on_progress=lambda p, j=idx, m=job.mark_sec: seg_progress(j, m, p),
@@ -1821,28 +2086,39 @@ def compose_timeline_to_all_mp4(
                     duration_sec=job.duration_sec,
                     video_start_sec=getattr(job, "video_start_sec", 0.0),
                     image_effect=getattr(job, "image_effect", "fixed"),
+                    motion_span_sec=mspan,
+                    motion_phase_sec=mphase,
                     is_hold=getattr(job, "is_hold", False),
+                    video_loop=getattr(job, "video_loop", True),
                     normalize_size=norm_size,
                     cancel_event=cancel_event,
                     on_progress=lambda p, j=idx, m=job.mark_sec: seg_progress(j, m, p),
                 )
+            clip_done = clip_path.is_file() and clip_path.stat().st_size >= 512
             _ensure_clip_duration(
                 clip_path,
                 job.duration_sec,
                 cancel_event=cancel_event,
             )
             if burn_subtitles and srt_path and Path(srt_path).is_file():
-                _maybe_burn_segment_subtitles(
-                    clip_path,
-                    srt_path=Path(srt_path),
-                    start_sec=job.mark_sec,
-                    duration_sec=job.duration_sec,
-                    play_res=norm_size,
-                    work_dir=work_dir,
-                    burn_subtitles=True,
-                    cancel_event=cancel_event,
-                    on_progress=lambda p, j=idx, m=job.mark_sec: seg_progress(j, m, min(99.0, p)),
-                )
+                _log(f"  자막 번인 … {clip_path.name}")
+                try:
+                    burned, burn_detail = _maybe_burn_segment_subtitles(
+                        clip_path,
+                        srt_path=Path(srt_path),
+                        start_sec=job.mark_sec,
+                        duration_sec=job.duration_sec,
+                        play_res=norm_size,
+                        work_dir=work_dir,
+                        burn_subtitles=True,
+                        cancel_event=cancel_event,
+                        on_progress=lambda p, j=idx, m=job.mark_sec: seg_progress(j, m, min(99.0, p)),
+                    )
+                except ComposeStopped:
+                    raise
+                if not burned:
+                    tail = f"\n  {burn_detail}" if burn_detail else ""
+                    _log(f"  [경고] 자막 번인 실패 — {clip_path.name} (자막 없이 클립 유지){tail}")
             clips.append(clip_path)
             out_dur = _probe_media_duration(clip_path)
             out_sz = clip_path.stat().st_size if clip_path.is_file() else 0
@@ -1851,25 +2127,56 @@ def compose_timeline_to_all_mp4(
         except ComposeStopped as e:
             _log(f"[클립 #{idx:02d} 중지] {e}")
             stopped = True
-            if e.path and e.path.is_file() and e.path.stat().st_size >= 512 and not clips:
+            if (
+                clip_done
+                and clip_path.is_file()
+                and clip_path.stat().st_size >= 512
+                and clip_path not in clips
+            ):
+                clips.append(clip_path)
+                _log(f"  → 완료 클립 포함 ({len(clips)}개)")
+            elif (
+                not clips
+                and e.path
+                and e.path.is_file()
+                and e.path.stat().st_size >= 512
+            ):
                 clips.append(e.path)
             break
         except Exception as e:
             _log(f"[클립 #{idx:02d} 실패]\n  {e}")
+            if cancel_event and cancel_event.is_set():
+                stopped = True
+                if (
+                    clip_done
+                    and clip_path.is_file()
+                    and clip_path.stat().st_size >= 512
+                    and clip_path not in clips
+                ):
+                    clips.append(clip_path)
+                    _log(f"  → 완료 클립 포함 ({len(clips)}개)")
+                break
             raise
     if not clips:
         raise RuntimeError("합성된 구간 클립이 없습니다.")
+    stopped = stopped or bool(cancel_event and cancel_event.is_set())
     report(segment_weight * 100.0, None, 0)
 
     mp3_path = Path(audio_mp3) if audio_mp3 else None
     mux_mp3 = bool(mp3_path and mp3_path.is_file())
     video_dest = work_dir / "_concat_video.mp4" if mux_mp3 else dest
-    _log(f"[연결 시작] 클립 {len(clips)}개 → {video_dest.name}")
-    finish_cancel = None if stopped else cancel_event
+    if stopped:
+        _log(f"[연결 시작 — 중지] 완료 클립 {len(clips)}개 → {video_dest.name}")
+    else:
+        _log(f"[연결 시작] 클립 {len(clips)}개 → {video_dest.name}")
+    # 중지 후에도 완료된 클립은 all.mp4 로 연결·음성까지 끝까지 저장
+    finish_cancel = None
 
     def concat_progress(pct: float) -> None:
         overall = segment_weight * 100.0 + pct * concat_weight
         report(overall, None, 0)
+        if stopped and pct > 0 and int(pct) % 20 == 0:
+            _log(f"  연결 진행 {int(pct)}% …")
 
     try:
         concat_videos(
@@ -1877,7 +2184,7 @@ def compose_timeline_to_all_mp4(
             video_dest,
             cancel_event=finish_cancel,
             on_progress=concat_progress,
-            fast_copy=not stopped,
+            fast_copy=True,
             video_only=mux_mp3,
         )
     except ComposeStopped:

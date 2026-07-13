@@ -15,11 +15,13 @@ from mp4_edit.ffmpeg_util import (
     crop_and_trim,
     extract_frame_png,
     extract_frame_png_from_url,
+    extract_timeline_frame,
     ffmpeg_bin,
     probe_duration,
     probe_video_size,
     resolve_edit_dest,
     temp_preview_png,
+    temp_timeline_dir,
 )
 from mp4_edit.log_util import log_file_display, mp4_edit_log, mp4_edit_log_exc
 from mp4_edit.paths import default_output_dir
@@ -34,7 +36,10 @@ from mp4_edit.youtube_util import (
 )
 from wisdom_workspace import folder_dialog_initial, touch_workspace_from_path
 
-_MP4_EXTS = (("MP4", "*.mp4"), ("동영상", "*.mp4;*.mov;*.mkv"), ("모든 파일", "*.*"))
+_TIMELINE_THUMB_W = 72
+_TIMELINE_THUMB_H = 54
+_TIMELINE_THUMB_MAX = 24
+_TIMELINE_THUMB_MIN = 4
 _FILMOT_URL = "https://filmot.com/"
 _YOUGLISH_URL = "https://youglish.com/"
 
@@ -146,6 +151,9 @@ def main(*, container: tk.Misc | None = None) -> None:
         "loading": False,
         "load_token": 0,
         "preview_job": None,
+        "timeline_thumbs": [],
+        "timeline_photos": [],
+        "timeline_thumb_token": 0,
     }
 
     if cfg.get("output_dir"):
@@ -198,7 +206,9 @@ def main(*, container: tk.Misc | None = None) -> None:
             return
         mp4_edit_log("load cancel requested")
         state["load_token"] = state.get("load_token", 0) + 1
+        state["timeline_thumb_token"] = state.get("timeline_thumb_token", 0) + 1
         state["loading"] = False
+        clear_timeline_thumbs()
         job = state.get("preview_job")
         if job is not None:
             try:
@@ -328,7 +338,7 @@ def main(*, container: tk.Misc | None = None) -> None:
     preview_cv = tk.Canvas(body, bg="#111", highlightthickness=1, highlightbackground="#555")
     preview_cv.grid(row=0, column=0, sticky="nsew")
 
-    timeline_cv = tk.Canvas(frm, height=48, bg="#222", highlightthickness=1, highlightbackground="#555")
+    timeline_cv = tk.Canvas(frm, height=64, bg="#222", highlightthickness=1, highlightbackground="#555")
     timeline_cv.grid(row=5, column=0, sticky="ew", pady=(8, 4))
 
     seek_fr = ttk.Frame(frm)
@@ -361,27 +371,124 @@ def main(*, container: tk.Misc | None = None) -> None:
         state["crop"] = None
         crop_var.set("영역: 전체")
 
+    def clear_timeline_thumbs() -> None:
+        state["timeline_thumbs"] = []
+        state["timeline_photos"] = []
+
+    def timeline_thumb_count() -> int:
+        w = max(timeline_cv.winfo_width(), 320)
+        return max(_TIMELINE_THUMB_MIN, min(_TIMELINE_THUMB_MAX, w // _TIMELINE_THUMB_W))
+
+    def schedule_timeline_thumbs() -> None:
+        dur = state["duration"]
+        path: Path | None = state.get("path")
+        yt_url: str | None = state.get("youtube_url")
+        if dur <= 0 or ((path is None or not path.is_file()) and not yt_url):
+            clear_timeline_thumbs()
+            redraw_timeline()
+            return
+        state["timeline_thumb_token"] = state.get("timeline_thumb_token", 0) + 1
+        token = state["timeline_thumb_token"]
+        count = timeline_thumb_count()
+        if count <= 1:
+            times = [0.0]
+        else:
+            times = [dur * i / (count - 1) for i in range(count)]
+
+        def work() -> None:
+            try:
+                mp4_edit_log(f"timeline thumbs start count={count} token={token}")
+                tl_dir = temp_timeline_dir()
+                stream = state.get("stream_url")
+                if yt_url and not stream:
+                    stream = get_youtube_stream_url(yt_url)
+                    state["stream_url"] = stream
+                from PIL import Image
+
+                images: list[tuple[float, Image.Image]] = []
+                for i, t in enumerate(times):
+                    if token != state.get("timeline_thumb_token", 0):
+                        mp4_edit_log(f"timeline thumbs cancelled token={token}")
+                        return
+                    png = tl_dir / f"tl_{token}_{i}.png"
+                    extract_timeline_frame(
+                        path=path if path and path.is_file() else None,
+                        stream_url=stream,
+                        time_sec=t,
+                        dest=png,
+                    )
+                    im = Image.open(png)
+                    im = im.resize(
+                        (_TIMELINE_THUMB_W, _TIMELINE_THUMB_H),
+                        Image.Resampling.LANCZOS,
+                    )
+                    images.append((t, im))
+
+                def apply() -> None:
+                    if token != state.get("timeline_thumb_token", 0):
+                        return
+                    from PIL import ImageTk
+
+                    photos: list[tuple[float, object]] = []
+                    keep: list[object] = []
+                    for t, im in images:
+                        photo = ImageTk.PhotoImage(im)
+                        photos.append((t, photo))
+                        keep.append(photo)
+                    state["timeline_thumbs"] = photos
+                    state["timeline_photos"] = keep
+                    redraw_timeline()
+                    mp4_edit_log(f"timeline thumbs ok count={len(photos)} token={token}")
+
+                safe_after(root, apply)
+            except Exception as e:
+                mp4_edit_log_exc(f"timeline thumbs FAIL token={token}", e)
+
+                def fail() -> None:
+                    if token != state.get("timeline_thumb_token", 0):
+                        return
+                    clear_timeline_thumbs()
+                    redraw_timeline()
+
+                safe_after(root, fail)
+
+        threading.Thread(target=work, daemon=True).start()
+
     def redraw_timeline() -> None:
         timeline_cv.delete("all")
         w = max(timeline_cv.winfo_width(), 10)
         h = max(timeline_cv.winfo_height(), 10)
         dur = state["duration"]
-        timeline_cv.create_rectangle(4, h // 2 - 6, w - 4, h // 2 + 6, fill="#444", outline="#666")
+        thumbs: list = state.get("timeline_thumbs") or []
+        pad = 4
+
+        if thumbs and dur > 0:
+            n = len(thumbs)
+            slot_w = (w - pad * 2) / n
+            for i, (_t, photo) in enumerate(thumbs):
+                x0 = pad + i * slot_w
+                x1 = pad + (i + 1) * slot_w
+                cx = (x0 + x1) / 2
+                timeline_cv.create_image(cx, h // 2, image=photo, anchor=tk.CENTER)
+                timeline_cv.create_rectangle(x0, 2, x1, h - 2, outline="#444")
+        else:
+            timeline_cv.create_rectangle(pad, h // 2 - 6, w - pad, h // 2 + 6, fill="#444", outline="#666")
+
         if dur <= 0:
             return
 
         def x_at(sec: float) -> float:
-            return 4 + (w - 8) * (sec / dur)
+            return pad + (w - pad * 2) * (sec / dur)
 
-        sx = x_at(state["start_sec"])
-        state["start_line"] = timeline_cv.create_line(sx, 4, sx, h - 4, fill="#4caf50", width=3)
-        timeline_cv.create_text(sx, 10, text="S", fill="#4caf50", anchor=tk.N)
         end_sec = state["end_sec"] if state["end_sec"] is not None else dur
+        sx = x_at(state["start_sec"])
         ex = x_at(end_sec)
-        state["end_line"] = timeline_cv.create_line(ex, 4, ex, h - 4, fill="#f44336", width=3)
-        timeline_cv.create_text(ex, h - 10, text="E", fill="#f44336", anchor=tk.S)
         if state["end_sec"] is not None and end_sec > state["start_sec"]:
-            timeline_cv.create_rectangle(sx, h // 2 - 6, ex, h // 2 + 6, fill="#2e7d32", outline="")
+            timeline_cv.create_rectangle(sx, 2, ex, h - 2, fill="#2e7d32", stipple="gray50", outline="")
+        state["start_line"] = timeline_cv.create_line(sx, 2, sx, h - 2, fill="#4caf50", width=3)
+        timeline_cv.create_text(sx, 8, text="S", fill="#4caf50", anchor=tk.N, font=(fam, max(8, sz - 1), "bold"))
+        state["end_line"] = timeline_cv.create_line(ex, 2, ex, h - 2, fill="#f44336", width=3)
+        timeline_cv.create_text(ex, h - 8, text="E", fill="#f44336", anchor=tk.S, font=(fam, max(8, sz - 1), "bold"))
 
     def update_time_labels() -> None:
         start_var.set(f"시작: {_fmt_time(state['start_sec'])}")
@@ -547,6 +654,7 @@ def main(*, container: tk.Misc | None = None) -> None:
         redraw_timeline()
         status_var.set(f"로드: {path.name} ({_fmt_time(dur)}, {size[0]}×{size[1]})")
         schedule_preview(0.0)
+        schedule_timeline_thumbs()
 
     def load_video(path: Path, *, source_text: str | None = None) -> None:
         path = Path(path)
@@ -584,6 +692,7 @@ def main(*, container: tk.Misc | None = None) -> None:
         redraw_timeline()
         status_var.set(f"YouTube: {state['youtube_id']} ({_fmt_time(state['duration'])})")
         schedule_preview(0.0)
+        schedule_timeline_thumbs()
 
     def resolve_and_load(text: str) -> None:
         raw = (text or "").strip()
@@ -593,6 +702,8 @@ def main(*, container: tk.Misc | None = None) -> None:
             return
         if state.get("loading") or state.get("busy"):
             return
+        clear_timeline_thumbs()
+        redraw_timeline()
         token = begin_load()
         if is_youtube_url(raw):
             set_status("YouTube 정보 조회 중…", tag="load")
@@ -700,7 +811,8 @@ def main(*, container: tk.Misc | None = None) -> None:
         if dur <= 0:
             return
         w = max(timeline_cv.winfo_width(), 10)
-        frac = max(0.0, min(1.0, (event.x - 4) / max(w - 8, 1)))
+        pad = 4
+        frac = max(0.0, min(1.0, (event.x - pad) / max(w - pad * 2, 1)))
         t = frac * dur
         if timeline_mode.get() == "start":
             state["start_sec"] = t
@@ -717,7 +829,17 @@ def main(*, container: tk.Misc | None = None) -> None:
         schedule_preview(t)
 
     timeline_cv.bind("<Button-1>", timeline_click)
-    timeline_cv.bind("<Configure>", lambda _e: redraw_timeline())
+
+    def on_timeline_configure(_e: tk.Event) -> None:
+        redraw_timeline()
+        if state["duration"] <= 0:
+            return
+        want = timeline_thumb_count()
+        have = len(state.get("timeline_thumbs") or [])
+        if have == 0 or abs(want - have) >= 2:
+            schedule_timeline_thumbs()
+
+    timeline_cv.bind("<Configure>", on_timeline_configure)
 
     def preview_press(event: tk.Event) -> None:
         state["drag_start"] = (event.x, event.y)

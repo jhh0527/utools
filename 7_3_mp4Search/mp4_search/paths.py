@@ -109,3 +109,50 @@ def resolve_mp3_for_srt(srt: Path) -> Path | None:
         if cand.is_file():
             return cand
     return None
+
+
+def pick_default_srt_mp3() -> tuple[Path | None, Path | None]:
+    """4_1_video 와 동일 — ``all.srt`` / ``all.mp3`` 우선."""
+    roots: list[Path] = []
+    seen: set[str] = set()
+
+    def add_root(p: Path | None) -> None:
+        if p is None:
+            return
+        p = Path(p)
+        if p.is_dir():
+            s = str(p)
+            if s not in seen:
+                seen.add(s)
+                roots.append(p)
+
+    try:
+        from wisdom_content_paths import default_mp3_dir
+
+        add_root(default_mp3_dir())
+    except ImportError:
+        pass
+    try:
+        from wisdom_workspace import workspace_module_output
+
+        add_root(workspace_module_output("2_1_ttsToVoice"))
+    except ImportError:
+        pass
+
+    for root in roots:
+        all_mp3 = root / "all.mp3"
+        all_srt = root / "all.srt"
+        if all_srt.is_file():
+            mp3 = all_mp3 if all_mp3.is_file() else resolve_mp3_for_srt(all_srt)
+            return all_srt, mp3
+        p1 = root / "part01.mp3"
+        s1 = root / "part01.srt"
+        if s1.is_file():
+            mp3 = p1 if p1.is_file() else resolve_mp3_for_srt(s1)
+            return s1, mp3
+        srts = sorted(root.glob("*.srt"))
+        if srts:
+            srt = srts[0]
+            mp3 = resolve_mp3_for_srt(srt)
+            return srt, mp3
+    return None, None

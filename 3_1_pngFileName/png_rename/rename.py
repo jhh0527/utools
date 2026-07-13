@@ -8,9 +8,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from png_rename.naming import (
-    is_clean_srt_png_name,
-    normalized_srt_png_name,
+    find_srt_asset_in_dir,
+    is_clean_srt_asset_name,
+    normalized_srt_asset_name,
     parse_srt_number_from_filename,
+    srt_asset_name,
+    srt_asset_name_for_path,
     srt_png_name,
 )
 from png_rename.ocr import (
@@ -81,10 +84,22 @@ def iter_png_files(folder: Path, *, recursive: bool = False) -> list[Path]:
     if not d.is_dir():
         raise NotADirectoryError(d)
     if recursive:
-        files = [p for p in d.rglob("*") if p.is_file() and p.suffix in PNG_EXTS]
+        files = [
+            p for p in d.rglob("*") if p.is_file() and p.suffix.lower() in PNG_EXTS
+        ]
     else:
-        files = [p for p in d.iterdir() if p.is_file() and p.suffix in PNG_EXTS]
+        files = [
+            p for p in d.iterdir() if p.is_file() and p.suffix.lower() in PNG_EXTS
+        ]
     return sorted(files, key=lambda p: p.name.lower())
+
+
+def _rename_via_tmp(src: Path, dst: Path) -> None:
+    tmp = src.parent / f"__renaming_{src.stem}__{src.suffix}"
+    if tmp.exists():
+        tmp.unlink()
+    src.rename(tmp)
+    tmp.rename(dst)
 
 
 def _ocr_word_location(
@@ -174,7 +189,7 @@ def apply_ocr_to_row(
         )
         score = score_text_match_sized(sized_tuples, cue_text)
         existing_n = _already_srt_named(src)
-        target_name = srt_png_name(slot)
+        target_name = srt_asset_name_for_path(slot, src)
         if not (row.target_name or "").strip() or row.target_name == "—":
             row.target_name = target_name
 
@@ -187,12 +202,12 @@ def apply_ocr_to_row(
             if skip_already_named and existing_n is not None:
                 if (
                     existing_n == slot
-                    and is_clean_srt_png_name(src.name)
+                    and is_clean_srt_asset_name(src.name)
                     and dst.resolve() == src.resolve()
                 ):
                     can_rename = False
                     status = "이미 올바른 이름"
-                elif existing_n == slot and is_clean_srt_png_name(src.name):
+                elif existing_n == slot and is_clean_srt_asset_name(src.name):
                     can_rename = False
                     status = "이미 SRT 형식(변경 불필요)"
             if slot in used:
@@ -244,7 +259,7 @@ def apply_ocr_to_row(
         row.match_reason = ""
         return
 
-    target_name = srt_png_name(map_id)
+    target_name = srt_asset_name_for_path(map_id, src)
     cue_one = cue_text.strip().replace("\n", " ")
     dst = src.parent / target_name
     existing_n = _already_srt_named(src)
@@ -262,12 +277,12 @@ def apply_ocr_to_row(
     if skip_already_named and existing_n is not None:
         if (
             existing_n == map_id
-            and is_clean_srt_png_name(src.name)
+            and is_clean_srt_asset_name(src.name)
             and dst.resolve() == src.resolve()
         ):
             can_rename = False
             status = "이미 올바른 이름"
-        elif existing_n == map_id and is_clean_srt_png_name(src.name):
+        elif existing_n == map_id and is_clean_srt_asset_name(src.name):
             can_rename = False
             status = "이미 SRT 형식(변경 불필요)"
     if map_id in used:
@@ -411,7 +426,7 @@ def scan_png_matches(
             )
             continue
 
-        target_name = srt_png_name(map_id)
+        target_name = srt_asset_name_for_path(map_id, src)
         cue_one = cue_text.strip().replace("\n", " ")
         dst = src.parent / target_name
         existing_n = _already_srt_named(src)
@@ -559,7 +574,7 @@ def remap_row_srt_from_filename(
     else:
         row.cue_text = f"(대본 {stem_n}번 — SRT 미등록)"
     if (row.target_name or "") in ("", "—"):
-        row.target_name = srt_png_name(row.srt_number)
+        row.target_name = srt_asset_name_for_path(row.srt_number, row.source)
 
 
 def remap_all_rows_from_filenames(
@@ -636,12 +651,14 @@ def build_srt_centric_skeleton(
 
     for map_id, text in cues:
         mid = int(map_id)
-        target = srt_png_name(mid)
         cue_one = text.strip().replace("\n", " ")
-        src = by_name.get(target.lower())
+        src = by_name.get(srt_png_name(mid).lower())
+        if src is None:
+            src = by_name.get(srt_asset_name(mid, ext=".jpg").lower())
         if src is None:
             src = by_srt_num.get(mid)
         if src is not None and src.is_file():
+            target = srt_asset_name_for_path(mid, src)
             _mark_used(src)
             result.append(
                 MatchPreview(
@@ -698,7 +715,7 @@ def build_srt_centric_skeleton(
             MatchPreview(
                 source=p,
                 srt_number=stem_n if stem_n is not None else -1,
-                target_name=srt_png_name(stem_n) if stem_n is not None else "—",
+                target_name=srt_asset_name_for_path(stem_n, p) if stem_n is not None else "—",
                 cue_text=cue_one,
                 score=0,
                 matched=False,
@@ -819,7 +836,7 @@ def find_srt_filename_normalizations(
     for src in iter_png_files(png_dir, recursive=recursive):
         if src.stem.lower() in _SKIP_STEMS:
             continue
-        clean = normalized_srt_png_name(src.name)
+        clean = normalized_srt_asset_name(src.name)
         if clean and clean != src.name:
             pairs.append((src, clean))
     return pairs
@@ -874,7 +891,7 @@ def apply_srt_filename_normalizations(
                 on_progress(i, total, r)
             continue
 
-        tmp = src.parent / f"__normalizing_{src.stem}__.png"
+        tmp = src.parent / f"__normalizing_{src.stem}__{src.suffix}"
         if tmp.exists():
             tmp.unlink()
         src.rename(tmp)
@@ -961,11 +978,7 @@ def apply_match_renames(
                 on_progress(i, total, r)
             continue
 
-        tmp = src.parent / f"__renaming_{src.stem}__.png"
-        if tmp.exists():
-            tmp.unlink()
-        src.rename(tmp)
-        tmp.rename(dst)
+        _rename_via_tmp(src, dst)
         r = RenameResult(
             source=src,
             target=dst,

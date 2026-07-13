@@ -14,7 +14,12 @@ from pathlib import Path
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 from png_rename import __version__
-from png_rename.naming import srt_png_name
+from png_rename.naming import (
+    find_srt_asset_in_dir,
+    srt_asset_name,
+    srt_asset_name_for_path,
+    srt_png_name,
+)
 from png_rename.paths import (
     default_download_dir,
     default_png_dir,
@@ -72,6 +77,7 @@ _THUMB_MAX = 560
 _APPLY_NEIGHBOR_ROWS = 5
 _THUMB_SIZE_MIN = 80
 _THUMB_SIZE_MAX = 1200
+_THUMB_CACHE_MAX = 48
 _VIEWER_SCREEN_RATIO = 0.92
 _SRT_NUM_IN_NAME = re.compile(r"(?:^|[^0-9])srt[-_ ]?0*(\d+)(?:[^0-9]|$)", re.IGNORECASE)
 _OCR_MATCH_BG = "#fff59d"
@@ -249,6 +255,23 @@ def main(
     _ocr_apply_source_iid: str | None = None
     _ocr_apply_srt_numbers: set[int] = set()
     _last_sel_iid_for_apply: str | None = None
+    _thumb_cache: dict[str, tk.PhotoImage] = {}
+    _preview_load_seq = 0
+
+    def _thumb_cache_key(path: Path, max_px: int) -> str:
+        try:
+            st = path.stat()
+            return f"{path.resolve()}:{st.st_mtime_ns}:{max_px}"
+        except OSError:
+            return f"{path}:{max_px}"
+
+    def _load_thumbnail_photo(path: Path, max_px: int) -> tk.PhotoImage:
+        from PIL import Image, ImageTk
+
+        with Image.open(path) as im:
+            im = im.convert("RGB")
+            im.thumbnail((max_px, max_px), Image.Resampling.BILINEAR)
+            return ImageTk.PhotoImage(im)
 
     frm = ttk.Frame(root, padding=10)
     frm.pack(fill=tk.BOTH, expand=True)
@@ -318,7 +341,7 @@ def main(
             target_count_var.set("(오류)")
             return
         sub = "하위 포함" if recursive_var.get() else "현재 폴더만"
-        target_count_var.set(f"PNG {n}개 ({sub})")
+        target_count_var.set(f"이미지 {n}개 ({sub})")
 
     def clear_table() -> None:
         rows_by_iid.clear()
@@ -327,6 +350,7 @@ def main(
         _all_rows_cache.clear()
         _ocr_pending.clear()
         _ocr_cache_keys.clear()
+        _thumb_cache.clear()
         _rename_source_by_row.clear()
         _filter_detached.clear()
         for iid in tree.get_children():
@@ -335,26 +359,15 @@ def main(
         clear_keyword_filter()
 
     def clear_preview() -> None:
-        nonlocal _thumb_photo, _preview_path, _preview_ocr, _preview_cue
+        nonlocal _thumb_photo, _preview_path, _preview_ocr, _preview_cue, _preview_load_seq
+        _preview_load_seq += 1
         _thumb_photo = None
         _preview_path = None
         _preview_ocr = ""
         _preview_cue = ""
         thumb_img_lbl.configure(image="", text="(미리보기 없음)")
         preview_name_var.set("")
-        preview_ocr_var.set("")
         preview_cue_var.set("")
-        _fill_preview_ocr_text("", "")
-
-    def _format_ocr_display(row: MatchPreview) -> str:
-        text = (row.ocr_preview or "").strip()
-        if text:
-            n = len(_ocr_preview_tokens(text))
-            return f"{text}  ({n}개 단어)"
-        return _OCR_EMPTY_MSG
-
-    def _fill_preview_ocr_text(ocr_preview: str, cue_text: str) -> None:
-        _fill_ocr_text_widget(preview_ocr_txt, ocr_preview, cue_text)
 
     def open_large_viewer(
         path: Path | None,
@@ -449,11 +462,12 @@ def main(
         if path is not None:
             return path
         if row.srt_number >= 0:
-            return _png_parent(row) / srt_png_name(row.srt_number)
+            found = find_srt_asset_in_dir(_png_parent(row), row.srt_number)
+            return found if found is not None else _png_parent(row) / srt_png_name(row.srt_number)
         return row.source
 
     def show_preview_for_iid(iid: str | None) -> None:
-        nonlocal _thumb_photo, _preview_path, _preview_ocr, _preview_cue
+        nonlocal _thumb_photo, _preview_path, _preview_ocr, _preview_cue, _preview_load_seq
         if not iid or iid not in rows_by_iid:
             clear_preview()
             return
@@ -461,45 +475,61 @@ def main(
         current_name = _mapped_current_display(row)
         path = _current_file_path(row)
         _preview_path = path
-        ocr = row.ocr_preview.strip().replace("\n", " ")
-        _preview_ocr = ocr
+        _preview_ocr = ""
         _preview_cue = row.cue_text.strip()
-        if current_name:
-            preview_name_var.set(current_name)
-        else:
-            preview_name_var.set("")
-        _fill_preview_ocr_text(row.ocr_preview, row.cue_text)
+        preview_name_var.set(current_name or "")
         cue = row.cue_text.strip()
-        word_cue = row.word_cue_text.strip()
-        word_no = (
-            str(row.word_srt_number) if row.word_srt_number >= 0 else "—"
-        )
-        parts: list[str] = []
-        if word_cue:
-            parts.append(f"[단어 발생 · {word_no}번] {word_cue}")
         if cue:
-            parts.append(f"[매칭 대본 · {row.srt_number}번] {cue}" if row.srt_number >= 0 else f"[매칭 대본] {cue}")
-        preview_cue_var.set("\n\n".join(parts) if parts else row.status)
+            if row.srt_number >= 0:
+                preview_cue_var.set(f"[대본 · {row.srt_number}번] {cue}")
+            else:
+                preview_cue_var.set(cue)
+        else:
+            preview_cue_var.set(row.status)
 
         if path is None or not path.is_file():
+            _preview_load_seq += 1
             _thumb_photo = None
             thumb_img_lbl.configure(image="", text="파일 없음")
             return
 
-        try:
-            from PIL import Image, ImageTk
-
-            with Image.open(path) as im:
-                im = im.convert("RGB")
-                im.thumbnail(
-                    (thumb_size[0], thumb_size[0]),
-                    Image.Resampling.LANCZOS,
-                )
-                _thumb_photo = ImageTk.PhotoImage(im)
+        cache_key = _thumb_cache_key(path, thumb_size[0])
+        cached = _thumb_cache.get(cache_key)
+        if cached is not None:
+            _thumb_photo = cached
             thumb_img_lbl.configure(image=_thumb_photo, text="")
-        except OSError as e:
-            _thumb_photo = None
-            thumb_img_lbl.configure(image="", text=f"이미지 열기 실패\n{e}")
+            return
+
+        _preview_load_seq += 1
+        load_id = _preview_load_seq
+        thumb_img_lbl.configure(image="", text="로딩…")
+
+        def work() -> None:
+            err: OSError | None = None
+            photo: tk.PhotoImage | None = None
+            try:
+                photo = _load_thumbnail_photo(path, thumb_size[0])
+            except OSError as e:
+                err = e
+
+            def ui() -> None:
+                nonlocal _thumb_photo
+                if load_id != _preview_load_seq:
+                    return
+                if photo is None:
+                    _thumb_photo = None
+                    msg = f"이미지 열기 실패\n{err}" if err else "이미지 열기 실패"
+                    thumb_img_lbl.configure(image="", text=msg)
+                    return
+                if len(_thumb_cache) >= _THUMB_CACHE_MAX:
+                    _thumb_cache.clear()
+                _thumb_cache[cache_key] = photo
+                _thumb_photo = photo
+                thumb_img_lbl.configure(image=_thumb_photo, text="")
+
+            safe_after(root, ui)
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _sel_mark(on: bool) -> str:
         return "☑" if on else "☐"
@@ -520,9 +550,19 @@ def main(
             return row.source.parent
         return row.source.parent
 
+    def _target_name_for_row(row: MatchPreview, n: int) -> str:
+        src = _resolve_rename_source(row)
+        if src is not None and src.is_file():
+            return srt_asset_name_for_path(n, src)
+        if row.source.suffix:
+            return srt_asset_name(n, ext=row.source.suffix)
+        return srt_png_name(n)
+
     def _expected_srt_filename(row: MatchPreview) -> str | None:
         if row.srt_number < 0:
             return None
+        if row.source.is_file():
+            return srt_asset_name_for_path(row.srt_number, row.source)
         return srt_png_name(row.srt_number)
 
     def _current_file_path(row: MatchPreview) -> Path | None:
@@ -530,6 +570,9 @@ def main(
         if row.source.is_file():
             return row.source
         if row.srt_number >= 0:
+            expected = find_srt_asset_in_dir(_png_parent(row), row.srt_number)
+            if expected is not None:
+                return expected
             expected = _png_parent(row) / srt_png_name(row.srt_number)
             return expected if expected.is_file() else None
         return None
@@ -538,13 +581,13 @@ def main(
         """``row.source`` 를 대본번호에 맞는 실제 파일 경로에 맞춤."""
         base = _png_parent(row)
         if row.srt_number >= 0:
-            expected = base / srt_png_name(row.srt_number)
-            if expected.is_file():
+            expected = find_srt_asset_in_dir(base, row.srt_number)
+            if expected is not None:
                 row.source = expected
             elif row.source.is_file():
                 pass  # 번호와 다른 이름의 실제 파일 유지(저장 시 rename 가능)
             else:
-                row.source = expected
+                row.source = base / srt_png_name(row.srt_number)
             return
         if row.source.is_file():
             return
@@ -573,10 +616,10 @@ def main(
         if tgt is None:
             raw = (row.target_name or "").strip()
             stem = Path(raw).name
-            if stem.lower().endswith(".png") and stem not in ("", "—"):
+            if stem.lower().endswith((".png", ".jpg", ".jpeg")) and stem not in ("", "—"):
                 tgt = stem
             else:
-                return "현재파일명이 SRT_XXX.png 형식이 아닙니다"
+                return "현재파일명이 SRT_XXX.png/.jpg 형식이 아닙니다"
         src = _rename_source_by_row.pop(id(row), None)
         if src is None or not src.is_file():
             src = _resolve_rename_source(row)
@@ -670,19 +713,19 @@ def main(
         if not candidates:
             return None
         if row.srt_number in candidates:
-            row.target_name = srt_png_name(row.srt_number)
+            row.target_name = _target_name_for_row(row, row.srt_number)
             return None
         if len(candidates) == 1:
             row.srt_number = candidates[0]
             _sync_cue_text(row)
-            row.target_name = srt_png_name(row.srt_number)
+            row.target_name = _target_name_for_row(row, row.srt_number)
             return None
         if row.srt_number >= 0 and row.srt_number in srt_cue_map:
-            row.target_name = srt_png_name(row.srt_number)
+            row.target_name = _target_name_for_row(row, row.srt_number)
             return None
         row.srt_number = candidates[0]
         _sync_cue_text(row)
-        row.target_name = srt_png_name(row.srt_number)
+        row.target_name = _target_name_for_row(row, row.srt_number)
         return None
 
     def _sync_row_match_fields(row: MatchPreview) -> None:
@@ -752,7 +795,7 @@ def main(
                     row.srt_number = candidates[0]
                     _sync_cue_text(row)
                 if not (row.target_name or "").strip() or row.target_name == "—":
-                    row.target_name = srt_png_name(row.srt_number)
+                    row.target_name = _target_name_for_row(row, row.srt_number)
             return None
         tgt = (row.target_name or "").strip()
         if row.srt_number in candidates and tgt not in ("", "—"):
@@ -765,7 +808,7 @@ def main(
             return "OCR 매핑 번호를 선택하지 않았습니다"
         row.srt_number = picked
         _sync_cue_text(row)
-        row.target_name = srt_png_name(row.srt_number)
+        row.target_name = _target_name_for_row(row, row.srt_number)
         _sync_row_match_fields(row)
         return None
 
@@ -813,7 +856,7 @@ def main(
         if pending:
             return pending
         if row.srt_number >= 0:
-            return srt_png_name(row.srt_number)
+            return _expected_srt_filename(row) or srt_png_name(row.srt_number)
         disk = _disk_file_name(row)
         if disk:
             norm = _normalize_target_name(disk)
@@ -1053,7 +1096,7 @@ def main(
     row_target.grid(row=7, column=0, sticky="ew", pady=(0, 6))
     ttk.Label(row_target, text="대상:").pack(side=tk.LEFT)
     ttk.Label(row_target, textvariable=target_count_var).pack(side=tk.LEFT, padx=(6, 12))
-    ttk.Button(row_target, text="PNG 개수 확인", command=refresh_count).pack(side=tk.LEFT)
+    ttk.Button(row_target, text="이미지 개수 확인", command=refresh_count).pack(side=tk.LEFT)
 
     opts = ttk.Frame(frm)
     opts.grid(row=8, column=0, sticky="ew", pady=(0, 6))
@@ -1092,7 +1135,6 @@ def main(
     ttk.Label(preview_frm, text="미리보기").pack(anchor=tk.W, pady=(0, 4))
 
     preview_name_var = tk.StringVar(value="")
-    preview_ocr_var = tk.StringVar(value="")
     preview_cue_var = tk.StringVar(value="")
     thumb_size_var = tk.IntVar(value=thumb_size[0])
     thumb_ctrl = ttk.Frame(preview_frm)
@@ -1131,22 +1173,6 @@ def main(
     thumb_img_lbl.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
     preview_name_lbl = ttk.Label(preview_frm, textvariable=preview_name_var)
     preview_name_lbl.pack(anchor=tk.W, fill=tk.X)
-    ttk.Label(preview_frm, text="OCR 조합 단어 (정확도 순 · 노란=대본 일치 · 빨강=오타)", foreground="#1565c0").pack(
-        anchor=tk.W, fill=tk.X, pady=(6, 0)
-    )
-    preview_ocr_txt = tk.Text(
-        preview_frm,
-        height=4,
-        wrap=tk.WORD,
-        font=("", 9),
-        relief=tk.FLAT,
-        borderwidth=1,
-        highlightthickness=1,
-        state=tk.DISABLED,
-        cursor="arrow",
-    )
-    _configure_ocr_text_tags(preview_ocr_txt)
-    preview_ocr_txt.pack(anchor=tk.W, fill=tk.X)
     preview_cue_lbl = ttk.Label(
         preview_frm,
         textvariable=preview_cue_var,
@@ -1577,7 +1603,6 @@ def main(
                 else:
                     _ocr_cache_keys.add(cache_key)
                 if iid in rows_by_iid and rows_by_iid[iid] is row:
-                    _remap_rows_from_filenames()
                     _sync_row_match_fields(row)
                     _refresh_row_display(iid, row)
                     show_preview_for_iid(iid)
@@ -1587,18 +1612,6 @@ def main(
             safe_after(root, ui)
 
         threading.Thread(target=work, daemon=True).start()
-
-    def _needs_row_ocr(row: MatchPreview) -> bool:
-        if (row.ocr_preview or "").strip():
-            return False
-        if id(row) in _ocr_pending:
-            return False
-        path = _current_file_path(row)
-        if path is None or not path.is_file():
-            return False
-        if path.stem.lower() in ("thumbnail_youtube", "thumbnail"):
-            return False
-        return True
 
     def on_tree_click(event: tk.Event) -> None:
         region = tree.identify_region(event.x, event.y)
@@ -1626,9 +1639,6 @@ def main(
         if region == "cell" and tree.identify_column(event.x) == "#1":
             toggle_iid(iid)
         show_preview_for_iid(iid)
-        row = rows_by_iid.get(iid)
-        if row is not None and _needs_row_ocr(row):
-            schedule_row_ocr(iid)
 
     def on_tree_select(_event: tk.Event | None = None) -> None:
         nonlocal _last_sel_iid_for_apply
@@ -1637,9 +1647,6 @@ def main(
         if sel and sel[0] in rows_by_iid:
             iid = sel[0]
             show_preview_for_iid(iid)
-            row = rows_by_iid.get(iid)
-            if row is not None and _needs_row_ocr(row):
-                schedule_row_ocr(iid)
             _last_sel_iid_for_apply = iid
             _refresh_apply_neighbor_columns(prev_iid, iid)
         else:
@@ -1677,10 +1684,10 @@ def main(
                 _sync_cue_text(target_row)
         else:
             applied_name = Path(name.strip()).name
-            if not applied_name.lower().endswith(".png"):
+            if not applied_name.lower().endswith((".png", ".jpg", ".jpeg")):
                 messagebox.showinfo(
                     "적용",
-                    "적용할 파일명이 .png 형식이 아닙니다.",
+                    "적용할 파일명이 .png 또는 .jpg 형식이 아닙니다.",
                 )
                 return
             target_row.target_name = applied_name
@@ -1995,7 +2002,7 @@ def main(
         n = _name_srt_num(name)
         if n is None:
             return None
-        return n, srt_png_name(n)
+        return n, srt_asset_name(n, ext=Path(name).suffix or ".png")
 
     # ---- 대본 번호 지정 · 셀 편집 ----
     _cell_editor: tk.Widget | None = None
@@ -2005,7 +2012,12 @@ def main(
         old_src = _resolve_rename_source(row)
         row.srt_number = n
         _sync_cue_text(row)
-        tgt_name = srt_png_name(n)
+        if old_src is not None and old_src.is_file():
+            tgt_name = srt_asset_name_for_path(n, old_src)
+        elif row.source.suffix:
+            tgt_name = srt_asset_name(n, ext=row.source.suffix)
+        else:
+            tgt_name = srt_png_name(n)
         row.target_name = tgt_name
         if old_src is not None and old_src.is_file():
             try:
@@ -2254,8 +2266,8 @@ def main(
                     if norm is None:
                         messagebox.showwarning(
                             "입력",
-                            "현재 파일명은 SRT_XXX.png 형식이어야 합니다.\n"
-                            "예: SRT_007.png",
+                            "현재 파일명은 SRT_XXX.png 또는 SRT_XXX.jpg 형식이어야 합니다.\n"
+                            "예: SRT_007.png / SRT_007.jpg",
                         )
                         return
                     row.target_name = norm
@@ -2518,7 +2530,14 @@ def main(
             srt_no = row.srt_number
         if srt_no >= 0:
             row.srt_number = srt_no
-            row.target_name = str(ov.get("target_name") or srt_png_name(srt_no))
+            row.target_name = str(
+                ov.get("target_name")
+                or (
+                    srt_asset_name_for_path(srt_no, row.source)
+                    if row.source.is_file()
+                    else srt_png_name(srt_no)
+                )
+            )
             cue = str(ov.get("cue_text") or "").strip()
             if cue:
                 row.cue_text = cue
@@ -2713,11 +2732,7 @@ def main(
 
     def on_thumb_double_click(_event: tk.Event) -> None:
         if _preview_path is not None:
-            open_large_viewer(
-                _preview_path,
-                ocr_words=_preview_ocr,
-                cue_text=_preview_cue,
-            )
+            open_large_viewer(_preview_path, cue_text=_preview_cue)
 
     thumb_img_lbl.bind("<Double-1>", on_thumb_double_click)
 
@@ -2950,14 +2965,14 @@ def main(
             else:
                 tgt = (r.target_name or "").strip()
                 if tgt in ("", "—") and r.srt_number >= 0:
-                    r.target_name = srt_png_name(r.srt_number)
+                    r.target_name = _target_name_for_row(r, r.srt_number)
                     tgt = r.target_name
             if tgt not in ("", "—"):
                 pending_raw.append(r)
         if not pending_raw:
             messagebox.showwarning(
                 "저장 불가",
-                "현재 파일명을 SRT_XXX.png 형식으로 지정하거나\n"
+                "현재 파일명을 SRT_XXX.png/.jpg 형식으로 지정하거나\n"
                 "대본 번호를 먼저 지정하세요.",
             )
             return
@@ -3194,7 +3209,7 @@ def main(
             messagebox.showinfo(
                 "파일명 정규화",
                 "정규화할 파일이 없습니다.\n"
-                "(예: SRT_240_8084dc2e.png → SRT_240.png)",
+                "(예: SRT_240_8084dc2e.png → SRT_240.png · SRT_240_abc.jpg → SRT_240.jpg)",
             )
             return
 

@@ -10,9 +10,9 @@ wisdom_repo = os.path.normpath(os.path.join(specdir, ".."))
 _module_dirs = (
     "1_1_textTo700Text",
     "2_1_ttsToVoice",
+    "2_2_imgDown",
     "3_1_pngFileName",
     "3_2_pngToJpg",
-    "4_1_video",
     "4_2_ShortVideo",
     "6_thumbnail",
     "7_utube",
@@ -50,9 +50,9 @@ if os.path.isfile(_example):
 
 _hidden_pkgs = (
     "elsub",
+    "img_down",
     "png_rename",
     "png2jpg",
-    "scenevid",
     "shortvid",
     "utube",
     "mp4_edit",

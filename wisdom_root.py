@@ -10,7 +10,8 @@ from pathlib import Path
 # wisdom 루트 판별용 (번호 체계 개편 후 폴더명)
 MARKER_DIRS = (
     "2_1_ttsToVoice",
-    "4_1_video",
+    "2_2_imgDown",
+    "4_2_ShortVideo",
     "1_1_textTo700Text",
     "7_2_mp4Edit",
 )
@@ -23,8 +24,7 @@ MODULE_LEGACY_ALIASES: dict[str, tuple[str, ...]] = {
     "2_2_srtToImage": ("4_srtToImage",),
     "3_1_pngFileName": ("4_2pngFileName",),
     "3_2_pngToJpg": ("4_1pngToJpg",),
-    "4_1_video": ("5_video",),
-    "4_2_ShortVideo": ("5_2_ShortVideo",),
+    "4_2_ShortVideo": ("5_2_ShortVideo", "5_video"),
 }
 
 _LEGACY_TO_CANONICAL: dict[str, str] = {

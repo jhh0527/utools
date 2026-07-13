@@ -11,7 +11,8 @@ from pathlib import Path
 
 _OCR_TOKEN = re.compile(r"[가-힣]+|[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)?")
 
-PNG_EXTS = frozenset({".png", ".PNG"})
+IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg"})
+PNG_EXTS = IMAGE_EXTS
 OCR_MAX_TOP_WORDS = 0  # 0 이면 OCR 단어 개수 제한 없음
 
 _WIN_TESSERACT = (

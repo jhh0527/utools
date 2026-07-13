@@ -7,9 +7,9 @@ from __future__ import annotations
 HUB_TABS: tuple[tuple[str, str], ...] = (
     ("1_1 대본700", "1_1_textTo700Text"),
     ("2_1 TTS", "2_1_ttsToVoice"),
+    ("2_2 이미지다운", "2_2_imgDown"),
     ("3_1 PNG이름", "3_1_pngFileName"),
     ("3_2 PNG→JPG", "3_2_pngToJpg"),
-    ("4_1 동영상", "4_1_video"),
     ("4_2 쇼츠", "4_2_ShortVideo"),
     ("6 썸네일", "6_thumbnail"),
     ("7_Utube", "7_utube"),

@@ -36,6 +36,54 @@ def load_download_mp4_inputs() -> dict[str, str]:
     return out
 
 
+def load_mp4_play_modes() -> dict[int, str]:
+    p = config_path()
+    if not p.is_file():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    raw = data.get("mp4_play_modes")
+    if not isinstance(raw, dict):
+        return {}
+    from mp4_search.mp4_play_modes import MP4_MODE_HOLD, MP4_MODE_LOOP, normalize_mp4_play_mode
+
+    out: dict[int, str] = {}
+    for k, v in raw.items():
+        try:
+            n = int(str(k).strip())
+        except ValueError:
+            continue
+        if isinstance(v, bool):
+            out[n] = normalize_mp4_play_mode(MP4_MODE_LOOP if v else MP4_MODE_HOLD)
+            continue
+        if isinstance(v, str) and v.strip():
+            out[n] = normalize_mp4_play_mode(v)
+    return out
+
+
+def save_mp4_play_modes(modes: dict[int, str]) -> None:
+    from mp4_search.mp4_play_modes import normalize_mp4_play_mode
+
+    p = config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    base: dict = {}
+    if p.is_file():
+        try:
+            cur = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(cur, dict):
+                base = cur
+        except (OSError, json.JSONDecodeError):
+            base = {}
+    base["mp4_play_modes"] = {
+        str(k): normalize_mp4_play_mode(v) for k, v in sorted(modes.items())
+    }
+    p.write_text(json.dumps(base, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def save_download_mp4_inputs(inputs: dict[str, str]) -> None:
     p = config_path()
     p.parent.mkdir(parents=True, exist_ok=True)

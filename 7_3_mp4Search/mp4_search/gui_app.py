@@ -21,6 +21,14 @@ from mp4_search.image_effects import (
     normalize_png_effect,
     png_effect_label,
 )
+from mp4_search.mp4_play_modes import (
+    MP4_MODE_BY_LABEL,
+    MP4_MODE_HOLD,
+    MP4_MODE_LOOP,
+    MP4_MODE_LABELS_LIST,
+    mp4_play_mode_label,
+    normalize_mp4_play_mode,
+)
 from mp4_search.download import (
     ComposeStopped,
     _probe_media_duration,
@@ -58,12 +66,20 @@ from mp4_search.timeline_compose import (
     missing_timeline_mp4_slots,
     timeline_total_sec,
 )
-from mp4_search.paths import default_output_dir, mp3_candidates_for_srt, resolve_mp3_for_srt, stock_api_config_write_path
+from mp4_search.paths import (
+    default_output_dir,
+    mp3_candidates_for_srt,
+    pick_default_srt_mp3,
+    resolve_mp3_for_srt,
+    stock_api_config_write_path,
+)
 from mp4_search.settings import (
     load_download_mp4_inputs,
     load_gui_settings,
+    load_mp4_play_modes,
     save_download_mp4_inputs,
     save_gui_settings,
+    save_mp4_play_modes,
 )
 from mp4_search.srt_parse import format_ms_short, parse_srt_cues_timed
 from mp4_search.stock_images import StockImage, image_cache_key, search_stock_images
@@ -83,6 +99,7 @@ _TREE_ROW_PX = 22
 _COL_KEYWORD = "keyword"
 _COL_DOWNLOAD = "download_mp4"
 _COL_MP4 = "mp4_file"
+_COL_MP4_MODE = "mp4_mode"
 _COL_PNG_FX = "png_fx"
 _COL_CUE = "cue"
 _KEYWORD_COL_WIDTH = 140
@@ -104,6 +121,7 @@ class CueRow:
     main_text: str = ""
     cue_ids: list[int] = field(default_factory=list)
     mp4_path: Path | None = None
+    mp4_play_mode: str = MP4_MODE_LOOP
     png_path: Path | None = None
     png_effect: str = "fixed"
     query: str = ""
@@ -140,6 +158,9 @@ def main(*, container: tk.Misc | None = None) -> None:
     )
 
     cfg = load_gui_settings()
+    default_srt, default_mp3 = pick_default_srt_mp3()
+    srt_init = cfg.get("srt_file", "") or (str(default_srt) if default_srt else "")
+    mp3_init = cfg.get("mp3_file", "") or (str(default_mp3) if default_mp3 else "")
     root, standalone = tk_host(container)
     apply_window_chrome(
         root,
@@ -156,11 +177,10 @@ def main(*, container: tk.Misc | None = None) -> None:
     fam, sz = _default_font()
     root.option_add("*Font", (fam, sz))
 
-    srt_var = tk.StringVar(value=cfg.get("srt_file", ""))
+    srt_var = tk.StringVar(value=srt_init)
     burn_sub_c = tk.BooleanVar(value=cfg.get("burn_subtitles", "1") != "0")
-    play_loop_var = tk.BooleanVar(value=cfg.get("play_loop", "0") == "1")
     mp4_var = tk.StringVar(value=cfg.get("mp4_dir", "") or str(default_output_dir()))
-    mp3_var = tk.StringVar(value=cfg.get("mp3_file", ""))
+    mp3_var = tk.StringVar(value=mp3_init)
     download_default = cfg.get("download_dir") or str(Path.home() / "Downloads")
     download_var = tk.StringVar(value=download_default)
     status_var = tk.StringVar(value="SRT 파일을 선택한 뒤 「① 목록 조회」를 누르세요.")
@@ -172,6 +192,7 @@ def main(*, container: tk.Misc | None = None) -> None:
     compose_cancel = threading.Event()
     rows: dict[str, CueRow] = {}
     download_mp4_inputs: dict[str, str] = load_download_mp4_inputs()
+    mp4_play_modes: dict[int, str] = load_mp4_play_modes()
     thumb_refs: list[tk.PhotoImage] = []
     preview_pane_w = int(cfg.get("preview_pane_width", str(_PREVIEW_PANE_DEFAULT)) or _PREVIEW_PANE_DEFAULT)
 
@@ -194,11 +215,35 @@ def main(*, container: tk.Misc | None = None) -> None:
             mp3_file=mp3_var.get().strip(),
             preview_pane_width=str(preview_pane_w),
             burn_subtitles=bool(burn_sub_c.get()),
-            play_loop=bool(play_loop_var.get()),
         )
+        save_mp4_play_modes(mp4_play_modes)
+
+    def _mp4_asset_number(path: Path | None) -> int | None:
+        if path is None or not path.is_file():
+            return None
+        return parse_srt_asset_number(path.name)
+
+    def _mp4_mode_for_asset(asset_n: int) -> str:
+        return normalize_mp4_play_mode(mp4_play_modes.get(asset_n, MP4_MODE_LOOP))
+
+    def _set_mp4_mode_for_asset(asset_n: int, mode: str) -> None:
+        mode = normalize_mp4_play_mode(mode)
+        mp4_play_modes[int(asset_n)] = mode
+        save_mp4_play_modes(mp4_play_modes)
+        for iid, row in rows.items():
+            n = _mp4_asset_number(row.mp4_path)
+            if n == int(asset_n):
+                row.mp4_play_mode = mode
+                refresh_tree_values(iid)
+
+    def _loop_for_path(path: Path) -> bool:
+        n = _mp4_asset_number(path)
+        if n is None:
+            return False
+        return _mp4_mode_for_asset(n) == MP4_MODE_LOOP
 
     def play_media(path: Path) -> None:
-        play_video(path, loop=bool(play_loop_var.get()))
+        play_video(path, loop=_loop_for_path(path))
 
     def suggest_mp3_from_srt() -> Path | None:
         if mp3_var.get().strip() and Path(mp3_var.get().strip()).is_file():
@@ -436,7 +481,7 @@ def main(*, container: tk.Misc | None = None) -> None:
 
     usage_hint = ttk.Label(
         frm,
-        text="④ 합성 → all.mp4 (+ MP3 음성 · 자막 옵션) · SRT# · 동영상 선택 · MP4 열 드롭",
+        text="④ 합성 → all.mp4 (+ MP3 음성 · 자막 하단 번인) · SRT# · MP4재생(유지/반복) · MP4 열 드롭",
     )
     usage_hint.grid(row=2, column=0, sticky="w", pady=(0, 4))
 
@@ -460,23 +505,6 @@ def main(*, container: tk.Misc | None = None) -> None:
     btn_compose_stop.pack(side=tk.LEFT, padx=(0, 8))
     btn_play = ttk.Button(ctrl_fr, text="▶ 재생")
     btn_play.pack(side=tk.LEFT, padx=(0, 12))
-    play_mode_fr = ttk.Frame(ctrl_fr)
-    play_mode_fr.pack(side=tk.LEFT, padx=(0, 12))
-    ttk.Label(play_mode_fr, text="재생:").pack(side=tk.LEFT, padx=(0, 4))
-    ttk.Radiobutton(
-        play_mode_fr,
-        text="마지막 장면 유지",
-        value=False,
-        variable=play_loop_var,
-        command=persist,
-    ).pack(side=tk.LEFT, padx=(0, 6))
-    ttk.Radiobutton(
-        play_mode_fr,
-        text="반복",
-        value=True,
-        variable=play_loop_var,
-        command=persist,
-    ).pack(side=tk.LEFT)
     ttk.Label(ctrl_fr, text="검색 키워드").pack(side=tk.LEFT, padx=(16, 4))
     keyword_ent = ttk.Entry(ctrl_fr, textvariable=keyword_var, width=40)
     keyword_ent.pack(side=tk.LEFT, padx=(0, 4))
@@ -536,6 +564,7 @@ def main(*, container: tk.Misc | None = None) -> None:
         "keyword",
         "download_mp4",
         "mp4_file",
+        "mp4_mode",
         "png_file",
         "png_fx",
         "status",
@@ -548,6 +577,7 @@ def main(*, container: tk.Misc | None = None) -> None:
     tree.heading("keyword", text="검색 키워드")
     tree.heading("download_mp4", text="다운로드파일")
     tree.heading("mp4_file", text="MP4")
+    tree.heading("mp4_mode", text="MP4재생")
     tree.heading("png_file", text="PNG")
     tree.heading("png_fx", text="이미지효과")
     tree.heading("status", text="상태")
@@ -558,6 +588,7 @@ def main(*, container: tk.Misc | None = None) -> None:
     tree.column("keyword", width=_KEYWORD_COL_WIDTH, anchor=tk.W, stretch=False)
     tree.column("download_mp4", width=100, anchor=tk.W, stretch=False)
     tree.column("mp4_file", width=80, anchor=tk.W, stretch=False)
+    tree.column("mp4_mode", width=52, anchor=tk.CENTER, stretch=False)
     tree.column("png_file", width=80, anchor=tk.W, stretch=False)
     tree.column("png_fx", width=72, anchor=tk.CENTER, stretch=False)
     tree.column("status", width=56, anchor=tk.CENTER, stretch=False)
@@ -780,6 +811,14 @@ def main(*, container: tk.Misc | None = None) -> None:
             slots.add(row_asset_sec(row))
         return slots
 
+    def _row_mp4_play_modes() -> dict[int, str]:
+        modes: dict[int, str] = {}
+        for row in rows.values():
+            n = _mp4_asset_number(row.mp4_path)
+            if n is not None:
+                modes[n] = normalize_mp4_play_mode(row.mp4_play_mode)
+        return modes
+
     def _row_png_effects() -> dict[int, str]:
         fx: dict[int, str] = {}
         for row in rows.values():
@@ -927,6 +966,7 @@ def main(*, container: tk.Misc | None = None) -> None:
                 row.mp4_path = dest
                 row.preview_path = dest
                 row.selected = None
+                _sync_row_mp4_mode(row)
                 return None, dest
             if _is_image_file(src):
                 dest = out_dir / srt_png_name(row_asset_sec(row))
@@ -1014,6 +1054,7 @@ def main(*, container: tk.Misc | None = None) -> None:
         row.mp4_path = dest
         row.preview_path = dest
         row.selected = None
+        _sync_row_mp4_mode(row)
         refresh_tree_values(iid)
 
         for old_path in delete_after:
@@ -1023,6 +1064,11 @@ def main(*, container: tk.Misc | None = None) -> None:
             except OSError:
                 pass
         return None
+
+    def _sync_row_mp4_mode(row: CueRow) -> None:
+        n = _mp4_asset_number(row.mp4_path)
+        if n is not None:
+            row.mp4_play_mode = _mp4_mode_for_asset(n)
 
     def refresh_tree_values(iid: str, *, status_override: str | None = None) -> None:
         row = rows.get(iid)
@@ -1047,6 +1093,7 @@ def main(*, container: tk.Misc | None = None) -> None:
         cue_full = row.cue_text.replace("\n", " ")
         range_label = section_label(row)
         dl_disp = _download_mp4_display(row)[:80]
+        mp4_mode_disp = mp4_play_mode_label(row.mp4_play_mode) if has_mp4 else ""
         tree.item(
             iid,
             values=(
@@ -1057,6 +1104,7 @@ def main(*, container: tk.Misc | None = None) -> None:
                 row.query,
                 dl_disp,
                 mp4_name,
+                mp4_mode_disp,
                 png_name,
                 png_effect_label(row.png_effect),
                 status,
@@ -1127,6 +1175,7 @@ def main(*, container: tk.Misc | None = None) -> None:
             if row_asset_sec(r) == asset_sec:
                 r.mp4_path = dest
                 r.preview_path = dest
+                _sync_row_mp4_mode(r)
                 refresh_tree_values(iid)
                 return
         row = current_row()
@@ -1134,6 +1183,7 @@ def main(*, container: tk.Misc | None = None) -> None:
             iid = current_iid()
             row.mp4_path = dest
             row.preview_path = dest
+            _sync_row_mp4_mode(row)
             if iid:
                 refresh_tree_values(iid)
 
@@ -1239,7 +1289,12 @@ def main(*, container: tk.Misc | None = None) -> None:
                 )
                 cue_one = (text or "").strip().replace("\n", " ")
                 dur = max(0.0, (en_ms - st_ms) / 1000.0)
-                iid = tree.insert("", tk.END, values=(srt_id, "", "", cue_one, "", "", "", "", "고정", ""))
+                iid = tree.insert("", tk.END, values=(srt_id, "", "", cue_one, "", "", "", "", "", "고정", ""))
+                mp4_mode = MP4_MODE_LOOP
+                if mp4_path and mp4_path.is_file():
+                    n = parse_srt_asset_number(mp4_path.name)
+                    if n is not None:
+                        mp4_mode = _mp4_mode_for_asset(n)
                 rows[iid] = CueRow(
                     srt_id=srt_id,
                     cue_text=cue_one,
@@ -1252,6 +1307,7 @@ def main(*, container: tk.Misc | None = None) -> None:
                     clip_end_sec=0.0,
                     cue_ids=[srt_id],
                     mp4_path=mp4_path,
+                    mp4_play_mode=mp4_mode,
                     png_path=png_path,
                     preview_path=mp4_path if mp4_path and mp4_path.is_file() else None,
                 )
@@ -1834,6 +1890,13 @@ def main(*, container: tk.Misc | None = None) -> None:
                         PNG_EFFECT_BY_LABEL.get(val, val)
                     )
                     refresh_tree_values(iid)
+                elif col_id == _COL_MP4_MODE:
+                    n = _mp4_asset_number(row.mp4_path)
+                    if n is not None:
+                        mode = normalize_mp4_play_mode(MP4_MODE_BY_LABEL.get(val, val))
+                        _set_mp4_mode_for_asset(n, mode)
+                    else:
+                        refresh_tree_values(iid)
             except tk.TclError:
                 pass
         try:
@@ -1849,7 +1912,7 @@ def main(*, container: tk.Misc | None = None) -> None:
         row = rows.get(iid)
         if not row:
             return
-        if col_id not in (_COL_KEYWORD, _COL_DOWNLOAD, _COL_PNG_FX):
+        if col_id not in (_COL_KEYWORD, _COL_DOWNLOAD, _COL_PNG_FX, _COL_MP4_MODE):
             return
         if _cell_editor is not None and _edit_iid == iid and _edit_col == col_id:
             try:
@@ -1888,6 +1951,31 @@ def main(*, container: tk.Misc | None = None) -> None:
             cb.bind("<<ComboboxSelected>>", lambda _e: commit())
             cb.bind("<Escape>", lambda _e: cancel())
             cb.bind("<FocusOut>", lambda _e: commit())
+            return
+
+        if col_id == _COL_MP4_MODE:
+            if not row.mp4_path or not row.mp4_path.is_file():
+                return
+            cb = ttk.Combobox(
+                tree,
+                values=list(MP4_MODE_LABELS_LIST),
+                state="readonly",
+                width=max(4, w // 10),
+            )
+            _cell_editor = cb
+            cb.place(x=x, y=y, width=max(w, 56), height=h)
+            cb.set(mp4_play_mode_label(row.mp4_play_mode))
+
+            def commit_mode() -> None:
+                _close_cell_editor(save=True)
+
+            def cancel_mode() -> None:
+                _close_cell_editor(save=False)
+
+            cb.focus_set()
+            cb.bind("<<ComboboxSelected>>", lambda _e: commit_mode())
+            cb.bind("<Escape>", lambda _e: cancel_mode())
+            cb.bind("<FocusOut>", lambda _e: commit_mode())
             return
 
         ent = ttk.Entry(tree)
@@ -1956,7 +2044,7 @@ def main(*, container: tk.Misc | None = None) -> None:
     def on_tree_cell_click(event: tk.Event) -> None:
         """편집 가능 셀 — 한 번 클릭으로 입력 (pngFileName 셀 편집과 동일)."""
         iid, col_id = _tree_col_id_at(event)
-        if not iid or col_id not in (_COL_KEYWORD, _COL_DOWNLOAD, _COL_PNG_FX):
+        if not iid or col_id not in (_COL_KEYWORD, _COL_DOWNLOAD, _COL_PNG_FX, _COL_MP4_MODE):
             return
         tree.selection_set(iid)
         tree.focus(iid)
@@ -1969,7 +2057,7 @@ def main(*, container: tk.Misc | None = None) -> None:
         iid, col_id = _tree_col_id_at(event)
         if not iid:
             return
-        if col_id in (_COL_KEYWORD, _COL_DOWNLOAD, _COL_PNG_FX):
+        if col_id in (_COL_KEYWORD, _COL_DOWNLOAD, _COL_PNG_FX, _COL_MP4_MODE):
             tree.selection_set(iid)
             _start_cell_edit(iid, col_id)
             return
@@ -2199,6 +2287,7 @@ def main(*, container: tk.Misc | None = None) -> None:
             if row_asset_sec(row) == asset_sec:
                 row.mp4_path = dest
                 row.preview_path = dest
+                _sync_row_mp4_mode(row)
                 refresh_tree_values(iid, status_override="합성됨")
                 return
 
@@ -2235,6 +2324,7 @@ def main(*, container: tk.Misc | None = None) -> None:
                 if mp4:
                     row.mp4_path = mp4
                     row.preview_path = mp4
+                    _sync_row_mp4_mode(row)
                 png = folder_asset_for_cue_row(
                     row.srt_id, asset, asset_png, png_owners, owns_asset=True
                 )
@@ -2310,6 +2400,7 @@ def main(*, container: tk.Misc | None = None) -> None:
         mp3_dur = _probe_media_duration(mp3_path) if mp3_path else None
         extra_mp4, extra_png = _row_asset_maps()
         extra_fx = _row_png_effects()
+        extra_modes = _row_mp4_play_modes()
         asset_times = _asset_start_times()
         mp4_map, png_map = scan_srt_assets(out_dir)
         mp4_map.update(extra_mp4)
@@ -2371,6 +2462,7 @@ def main(*, container: tk.Misc | None = None) -> None:
             extra_mp4=extra_mp4,
             extra_png=extra_png,
             png_effects=extra_fx,
+            mp4_play_modes=extra_modes,
             asset_start_times=asset_times,
         )
         if not jobs:
@@ -2433,7 +2525,19 @@ def main(*, container: tk.Misc | None = None) -> None:
 
             def on_overall(pct: float, mark_sec: float | None, idx: int, job_total: int) -> None:
                 label = _compose_progress_label(pct, mark_sec, idx, job_total)
-                safe_after(root, lambda p=pct, lb=label: set_compose_progress(p, lb))
+                saving = compose_cancel.is_set()
+
+                def ui(p: float = pct, lb: str = label, save: bool = saving) -> None:
+                    set_compose_progress(p, lb)
+                    if save:
+                        if idx == -1:
+                            status_var.set(f"합성 중지… (MP3 음성 저장 중) {int(p)}%")
+                        elif mark_sec is None:
+                            status_var.set(f"합성 중지… (완료 구간 저장 중) {int(p)}%")
+                        else:
+                            status_var.set(f"합성 중지… (완료 구간 저장 중) {int(p)}%")
+
+                safe_after(root, ui)
                 if idx > 0 and idx != last_logged_job["v"] and idx <= len(compose_jobs):
                     last_logged_job["v"] = idx
                     j = compose_jobs[idx - 1]

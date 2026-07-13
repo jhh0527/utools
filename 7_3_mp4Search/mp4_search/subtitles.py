@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""타임라인 합성 구간 자막 — 4_1_video(scenevid) 와 동일 스타일."""
+"""타임라인 합성 구간 자막 — 4_1_video(scenevid) 와 동일 스타일(하단 중앙, Alignment=2)."""
 
 from __future__ import annotations
 
