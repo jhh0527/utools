@@ -42,6 +42,7 @@ from mp4_search.download import (
     extract_video_frame_png,
     find_download_asset,
     play_video,
+    stop_preview_players,
     temp_preview_path,
     trim_video,
 )
@@ -68,6 +69,7 @@ from mp4_search.timeline_compose import (
 )
 from mp4_search.paths import (
     default_output_dir,
+    media_dirs_for_srt,
     mp3_candidates_for_srt,
     pick_default_srt_mp3,
     resolve_mp3_for_srt,
@@ -245,6 +247,18 @@ def main(*, container: tk.Misc | None = None) -> None:
     def play_media(path: Path) -> None:
         play_video(path, loop=_loop_for_path(path))
 
+    def apply_media_paths_from_srt(*, force_mp3: bool = True) -> None:
+        """SRT 상위의 ``mp4``·``mp3`` 폴더를 자동 지정 (이후 수동 변경 가능)."""
+        srt = Path(srt_var.get().strip())
+        if not srt.is_file():
+            return
+        mp4_d, _mp3_d = media_dirs_for_srt(srt)
+        mp4_var.set(str(mp4_d))
+        if force_mp3 or not (mp3_var.get().strip() and Path(mp3_var.get().strip()).is_file()):
+            found = resolve_mp3_for_srt(srt)
+            if found:
+                mp3_var.set(str(found))
+
     def suggest_mp3_from_srt() -> Path | None:
         if mp3_var.get().strip() and Path(mp3_var.get().strip()).is_file():
             return Path(mp3_var.get().strip())
@@ -346,7 +360,7 @@ def main(*, container: tk.Misc | None = None) -> None:
             return
         touch_workspace_from_path(p)
         srt_var.set(p)
-        suggest_mp3_from_srt()
+        apply_media_paths_from_srt(force_mp3=True)
         persist()
 
     ttk.Button(path_fr, text="찾기…", command=pick_srt).grid(row=0, column=2)
@@ -409,7 +423,11 @@ def main(*, container: tk.Misc | None = None) -> None:
             init = init.parent
         elif not init.is_dir():
             srt = Path(srt_var.get().strip())
-            init = srt.parent if srt.is_file() else Path.home()
+            if srt.is_file():
+                _mp4_d, mp3_d = media_dirs_for_srt(srt)
+                init = mp3_d if mp3_d.is_dir() else srt.parent
+            else:
+                init = Path.home()
         p = filedialog.askopenfilename(
             title="MP3 파일 (합성 시 음성)",
             initialdir=folder_dialog_initial(init),
@@ -430,13 +448,17 @@ def main(*, container: tk.Misc | None = None) -> None:
         command=persist,
     ).grid(row=4, column=1, sticky="w", padx=(4, 0), pady=(6, 0))
 
+    def _on_srt_path_set(_p: str) -> None:
+        apply_media_paths_from_srt(force_mp3=True)
+        persist()
+
     bind_path_row_dnd(
         path_fr,
         srt_ent,
         srt_var,
         mode="file",
         extensions=(".srt",),
-        on_set=lambda _p: persist(),
+        on_set=_on_srt_path_set,
     )
     bind_path_row_dnd(
         path_fr,
@@ -1436,6 +1458,17 @@ def main(*, container: tk.Misc | None = None) -> None:
 
         threading.Thread(target=work, daemon=True).start()
 
+    image_viewer_wins: list[tk.Toplevel] = []
+
+    def _close_image_viewers() -> None:
+        for w in list(image_viewer_wins):
+            try:
+                if w.winfo_exists():
+                    w.destroy()
+            except tk.TclError:
+                pass
+        image_viewer_wins.clear()
+
     def _open_image_viewer(path: Path, *, title: str = "") -> None:
         try:
             from PIL import Image, ImageTk
@@ -1448,6 +1481,7 @@ def main(*, container: tk.Misc | None = None) -> None:
         except Exception as e:
             safe_messagebox(root, "showerror", "7_3 mp4Search", f"이미지를 열 수 없습니다.\n{e}")
             return
+        _close_image_viewers()
         win = tk.Toplevel(root)
         win.title(title or path.name)
         try:
@@ -1458,6 +1492,21 @@ def main(*, container: tk.Misc | None = None) -> None:
         lbl.image = photo
         lbl.pack(padx=10, pady=10)
         ttk.Label(win, text=path.name, foreground="#666").pack(pady=(0, 8))
+        image_viewer_wins.append(win)
+
+        def _on_viewer_close() -> None:
+            try:
+                image_viewer_wins.remove(win)
+            except ValueError:
+                pass
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
+
+        win.protocol("WM_DELETE_WINDOW", _on_viewer_close)
+        # 백그라운드에 남지 않도록 30초 후 자동 닫기
+        win.after(30_000, _on_viewer_close)
 
     def show_image_large(image: StockImage) -> None:
         row = current_row()
@@ -2714,6 +2763,8 @@ def main(*, container: tk.Misc | None = None) -> None:
     keyword_ent.bind("<Return>", lambda _e: run_search())
 
     def on_close() -> None:
+        stop_preview_players()
+        _close_image_viewers()
         persist()
 
     if standalone:

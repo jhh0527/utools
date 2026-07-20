@@ -63,6 +63,8 @@ def _base_opts(*, quiet: bool = True) -> dict:
         "retries": 2,
         "fragment_retries": 2,
         "extractor_retries": 2,
+        # 회사 프록시·자체서명 인증서 환경에서 SSL 실패 방지
+        "nocheckcertificate": True,
     }
     if ff:
         opts["ffmpeg_location"] = str(ff.parent)

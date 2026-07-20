@@ -22,6 +22,12 @@ _WIN_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _active_ffmpeg_proc: subprocess.Popen | None = None
 _active_ffmpeg_lock = threading.Lock()
 
+# 미리보기(ffplay) — 이전 재생 종료 + 최대 재생 시간
+_PREVIEW_MAX_SEC = 30.0
+_active_preview_procs: list[subprocess.Popen] = []
+_active_preview_lock = threading.Lock()
+_preview_kill_timer: threading.Timer | None = None
+
 
 def _win_subprocess_flags() -> dict:
     if sys.platform == "win32" and _WIN_NO_WINDOW:
@@ -2232,28 +2238,75 @@ def compose_timeline_to_all_mp4(
     return dest
 
 
-def play_video(path: Path, *, loop: bool = False) -> None:
-    """ffplay(우선) 또는 OS 기본 플레이어로 재생.
+def stop_preview_players() -> None:
+    """미리보기 ffplay 등 재생 프로세스·타이머를 모두 종료."""
+    global _preview_kill_timer
+    with _active_preview_lock:
+        timer = _preview_kill_timer
+        _preview_kill_timer = None
+        procs = list(_active_preview_procs)
+        _active_preview_procs.clear()
+    if timer is not None:
+        timer.cancel()
+    for proc in procs:
+        if proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
 
-    loop=False(기본): 1회 재생 후 마지막 프레임 유지(ffplay 창 유지).
-    loop=True: 반복 재생.
+
+def play_video(path: Path, *, loop: bool = False, max_sec: float = _PREVIEW_MAX_SEC) -> None:
+    """ffplay(우선)로 미리보기 재생.
+
+    - 새 재생 시작 시 이전 미리보기는 즉시 종료
+    - 1회 재생은 ``-autoexit`` 로 끝나면 창 닫힘
+    - 반복·장시간 클립도 ``max_sec``(기본 30초) 후 강제 종료
+    - OS 기본 플레이어(fallback)는 프로세스 제어가 어려워 ffplay 없을 때만 사용
     """
+    global _preview_kill_timer
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(str(path))
+    stop_preview_players()
+    limit = max(1.0, float(max_sec))
     ff = _ffmpeg_exe("ffplay")
     if ff:
-        cmd = [str(ff), "-window_title", "7_3 mp4Search", str(path)]
+        cmd = [str(ff), "-autoexit", "-window_title", "7_3 mp4Search"]
         if loop:
             cmd[1:1] = ["-loop", "0"]
-        subprocess.Popen(cmd, **_win_subprocess_flags())
+        cmd.append(str(path))
+        # CREATE_NO_WINDOW: 콘솔만 숨김 (SDL 미리보기 창은 유지)
+        proc = subprocess.Popen(cmd, **_win_subprocess_flags())
+        with _active_preview_lock:
+            _active_preview_procs.append(proc)
+
+            def _timed_kill(p: subprocess.Popen = proc) -> None:
+                if p.poll() is None:
+                    try:
+                        p.kill()
+                    except OSError:
+                        pass
+                with _active_preview_lock:
+                    try:
+                        _active_preview_procs.remove(p)
+                    except ValueError:
+                        pass
+
+            _preview_kill_timer = threading.Timer(limit, _timed_kill)
+            _preview_kill_timer.daemon = True
+            _preview_kill_timer.start()
         return
     if sys.platform == "win32":
         os.startfile(str(path))  # noqa: S606
     elif sys.platform == "darwin":
-        subprocess.Popen(["open", str(path)], **_win_subprocess_flags())
+        subprocess.Popen(["open", str(path)])
     else:
-        subprocess.Popen(["xdg-open", str(path)], **_win_subprocess_flags())
+        subprocess.Popen(["xdg-open", str(path)])
 
 
 def temp_preview_path(suffix: str = ".mp4", *, tag: str = "") -> Path:

@@ -11,7 +11,7 @@ from png_rename.rename import (
     scan_srt_centric_matches,
 )
 
-__version__ = "0.3.38"
+__version__ = "0.3.40"
 __all__ = [
     "MatchPreview",
     "apply_ocr_to_row",

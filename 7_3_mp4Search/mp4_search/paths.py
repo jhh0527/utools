@@ -66,6 +66,32 @@ def stock_api_config_candidates() -> list[Path]:
     return out
 
 
+def media_dirs_for_srt(srt: Path) -> tuple[Path, Path]:
+    """SRT 기준 콘텐츠 루트의 ``mp4``·``mp3`` 폴더 (없으면 경로만 구성).
+
+    ``…/kor/mp3/all.srt`` → ``…/kor/mp4``, ``…/kor/mp3``
+    ``…/kor/all.srt`` → ``…/kor/mp4``, ``…/kor/mp3``
+    """
+    from wisdom_content_paths import find_child_dir
+
+    srt = Path(srt)
+    start = srt.parent if srt.suffix or srt.is_file() else srt
+    root = start
+    if start.name.casefold() in ("mp3", "mp4", "png", "jpg", "srt"):
+        root = start.parent
+    else:
+        for cand in (start, *start.parents):
+            mp4_c = find_child_dir(cand, "mp4")
+            mp3_c = find_child_dir(cand, "mp3")
+            if mp4_c.is_dir() or mp3_c.is_dir():
+                root = cand
+                break
+            if cand.name.casefold() in ("mp3", "mp4", "png", "jpg", "srt"):
+                root = cand.parent
+                break
+    return find_child_dir(root, "mp4"), find_child_dir(root, "mp3")
+
+
 def mp3_candidates_for_srt(srt: Path) -> list[Path]:
     """SRT·작업 폴더 기준 MP3 후보 (``all.mp3``, ``part01.mp3``, SRT와 같은 이름 등)."""
     out: list[Path] = []
@@ -78,19 +104,25 @@ def mp3_candidates_for_srt(srt: Path) -> list[Path]:
             out.append(p)
 
     srt = Path(srt)
-    if srt.is_file():
+    _, mp3_dir = media_dirs_for_srt(srt) if (srt.is_file() or srt.suffix) else (Path(), Path())
+    if mp3_dir:
+        if srt.is_file() or srt.suffix:
+            add(mp3_dir / srt.with_suffix(".mp3").name)
+        for name in ("all.mp3", "part01.mp3"):
+            add(mp3_dir / name)
+    if srt.is_file() or srt.suffix:
         add(srt.with_suffix(".mp3"))
         for name in ("all.mp3", "part01.mp3"):
             add(srt.parent / name)
     try:
         from wisdom_content_paths import default_mp3_dir
 
-        mp3_dir = default_mp3_dir()
-        if mp3_dir and mp3_dir.is_dir():
-            if srt.is_file():
-                add(mp3_dir / srt.with_suffix(".mp3").name)
+        cfg_mp3 = default_mp3_dir()
+        if cfg_mp3 and cfg_mp3.is_dir():
+            if srt.is_file() or srt.suffix:
+                add(cfg_mp3 / srt.with_suffix(".mp3").name)
             for name in ("all.mp3", "part01.mp3"):
-                add(mp3_dir / name)
+                add(cfg_mp3 / name)
     except ImportError:
         pass
     try:

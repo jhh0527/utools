@@ -265,13 +265,20 @@ def main(
         except OSError:
             return f"{path}:{max_px}"
 
-    def _load_thumbnail_photo(path: Path, max_px: int) -> tk.PhotoImage:
-        from PIL import Image, ImageTk
+    def _read_thumbnail_image(path: Path, max_px: int):
+        """디스크에서 썸네일용 PIL 이미지 로드 (스레드 안전)."""
+        from PIL import Image
 
         with Image.open(path) as im:
             im = im.convert("RGB")
             im.thumbnail((max_px, max_px), Image.Resampling.BILINEAR)
-            return ImageTk.PhotoImage(im)
+            return im.copy()
+
+    def _photo_from_pil(im) -> tk.PhotoImage:
+        """Tk PhotoImage 는 메인 스레드에서만 생성."""
+        from PIL import ImageTk
+
+        return ImageTk.PhotoImage(im)
 
     frm = ttk.Frame(root, padding=10)
     frm.pack(fill=tk.BOTH, expand=True)
@@ -315,6 +322,7 @@ def main(
                 var.set(p)
                 refresh_count()
                 persist()
+                root.after_idle(_maybe_reload_grid)
 
         btn = ttk.Button(rf, text="찾아보기…", command=pick)
         btn.grid(row=0, column=1)
@@ -327,7 +335,11 @@ def main(
             extensions=() if is_dir else tuple(
                 ext.strip().lstrip("*") for _label, ext in (filetypes or [("SRT", "*.srt")])
             ),
-            on_set=lambda _p: (refresh_count(), persist()),
+            on_set=lambda _p: (
+                refresh_count(),
+                persist(),
+                root.after_idle(_maybe_reload_grid),
+            ),
         )
 
     def refresh_count() -> None:
@@ -505,21 +517,27 @@ def main(
         thumb_img_lbl.configure(image="", text="로딩…")
 
         def work() -> None:
-            err: OSError | None = None
-            photo: tk.PhotoImage | None = None
+            err: BaseException | None = None
+            pil_im = None
             try:
-                photo = _load_thumbnail_photo(path, thumb_size[0])
-            except OSError as e:
+                pil_im = _read_thumbnail_image(path, thumb_size[0])
+            except Exception as e:
                 err = e
 
             def ui() -> None:
                 nonlocal _thumb_photo
                 if load_id != _preview_load_seq:
                     return
-                if photo is None:
+                if pil_im is None:
                     _thumb_photo = None
                     msg = f"이미지 열기 실패\n{err}" if err else "이미지 열기 실패"
                     thumb_img_lbl.configure(image="", text=msg)
+                    return
+                try:
+                    photo = _photo_from_pil(pil_im)
+                except Exception as e:
+                    _thumb_photo = None
+                    thumb_img_lbl.configure(image="", text=f"이미지 표시 실패\n{e}")
                     return
                 if len(_thumb_cache) >= _THUMB_CACHE_MAX:
                     _thumb_cache.clear()
@@ -1350,10 +1368,19 @@ def main(
 
     def show_all_rows(*, select_first: bool = True) -> None:
         """캐시된 전체 대본 행을 목록에 표시."""
-        for iid in tree.get_children():
-            tree.delete(iid)
+        for iid in list(tree.get_children("")):
+            try:
+                tree.delete(iid)
+            except tk.TclError:
+                pass
+        for iid in list(rows_by_iid):
+            try:
+                tree.delete(iid)
+            except tk.TclError:
+                pass
         rows_by_iid.clear()
         selected_iids.clear()
+        _filter_detached.clear()
         if not _all_rows_cache:
             clear_preview()
             return
@@ -1361,15 +1388,25 @@ def main(
             _insert_row(row, default_checked=False)
         if not select_first:
             return
-        kids = tree.get_children("")
-        if kids:
-            first = kids[0]
-            tree.selection_set(first)
-            tree.focus(first)
-            tree.see(first)
-            show_preview_for_iid(first)
-        else:
+        _select_best_startup_row()
+
+    def _select_best_startup_row() -> bool:
+        """이미지가 있는 첫 행(없으면 첫 행)을 선택·미리보기."""
+        kids = list(tree.get_children(""))
+        if not kids:
             clear_preview()
+            return False
+        pick = kids[0]
+        for iid in kids:
+            row = rows_by_iid.get(iid)
+            if row is not None and row.source.is_file():
+                pick = iid
+                break
+        tree.selection_set(pick)
+        tree.focus(pick)
+        tree.see(pick)
+        show_preview_for_iid(pick)
+        return True
 
     def _paths_same(a: Path, b: Path) -> bool:
         try:
@@ -1487,6 +1524,7 @@ def main(
                 selected_row_ids.clear()
                 _ocr_pending.clear()
                 _ocr_cache_keys.clear()
+                _thumb_cache.clear()
                 _all_rows_cache[:] = skel
                 _remap_rows_from_filenames()
                 _sort_tree_by_srt_asc(refresh_heading=True)
@@ -1495,7 +1533,7 @@ def main(
                 traceback.print_exc()
                 if not quiet:
                     messagebox.showerror("새로고침", str(e))
-                    status_var.set(f"새로고침 오류: {e}")
+                status_var.set(f"새로고침 오류: {e}")
         if not reloaded:
             png = Path(png_var.get().strip())
             if srt_cue_map and png.is_dir():
@@ -1505,8 +1543,9 @@ def main(
                 _sync_row_source_from_disk(row)
             _remap_rows_from_filenames()
             show_all_rows(select_first=sel_srt is None)
+        restored = False
         if sel_srt is not None:
-            for iid in tree.get_children():
+            for iid in tree.get_children(""):
                 row = rows_by_iid.get(iid)
                 if row and row.srt_number == sel_srt:
                     tree.selection_set(iid)
@@ -1514,12 +1553,32 @@ def main(
                     show_preview_for_iid(iid)
                     _last_sel_iid_for_apply = iid
                     _refresh_apply_neighbor_columns(None, iid)
+                    restored = True
                     break
+        if not restored:
+            _select_best_startup_row()
+        n_img = sum(1 for r in _all_rows_cache if r.source.is_file())
+        n_rows = len(_all_rows_cache)
         if status_msg is not None:
             status_var.set(status_msg)
-        elif reloaded and not quiet:
-            status_var.set("")
+        elif reloaded:
+            status_var.set(
+                f"목록 {n_rows}행 · 이미지 파일 {n_img}개"
+                + (f" · {png.name}" if png.is_dir() else "")
+            )
         root.update_idletasks()
+
+    def _maybe_reload_grid() -> None:
+        """SRT·PNG 경로가 모두 유효하면 그리드에 목록을 채운다 (경로 지정·드롭 직후)."""
+        srt = Path(srt_var.get().strip())
+        png = Path(png_var.get().strip())
+        if srt.is_file() and png.is_dir():
+            reload_table(quiet=True)
+            return
+        if png.is_dir() and not srt.is_file():
+            status_var.set("PNG 폴더 지정됨 — 대본 SRT를 지정하면 목록이 표시됩니다.")
+        elif srt.is_file() and not png.is_dir():
+            status_var.set("SRT 지정됨 — PNG 폴더를 지정하면 목록이 표시됩니다.")
 
     tree.tag_configure("muted", foreground="#888888")
     tree.tag_configure("matched", foreground="#1565c0")
@@ -2753,12 +2812,16 @@ def main(
 
     prog = ttk.Progressbar(frm, mode="determinate", maximum=100)
     prog.grid(row=11, column=0, sticky="ew", pady=(0, 4))
+    ttk.Label(frm, textvariable=status_var, foreground="#333333").grid(
+        row=12, column=0, sticky="ew", pady=(0, 2)
+    )
 
     btn_scan: ttk.Button
     btn_cancel_scan: ttk.Button
     btn_save: ttk.Button
     btn_delete: ttk.Button
     btn_normalize: ttk.Button
+    btn_refresh: tk.Button
 
     def _load_table_from_disk() -> bool:
         """SRT·PNG 폴더 기준으로 목록을 다시 읽어 표시 (OCR 없음)."""
@@ -2766,11 +2829,37 @@ def main(
         png = Path(png_var.get().strip())
         if not srt.is_file():
             messagebox.showerror("SRT", f"파일이 없습니다:\n{srt}")
+            status_var.set("SRT 파일이 없습니다.")
             return False
         if not png.is_dir():
             messagebox.showerror("PNG 폴더", f"폴더가 없습니다:\n{png}")
+            status_var.set("PNG 폴더가 없습니다.")
             return False
-        reload_table()
+        n_disk = 0
+        try:
+            n_disk = len(iter_png_files(png, recursive=bool(recursive_var.get())))
+        except OSError as e:
+            messagebox.showerror("PNG 폴더", str(e))
+            status_var.set(f"PNG 폴더 오류: {e}")
+            return False
+        reload_table(
+            status_msg=None,
+            quiet=False,
+        )
+        n_img = sum(1 for r in _all_rows_cache if r.source.is_file())
+        if n_disk and not n_img:
+            status_var.set(
+                f"폴더에 이미지 {n_disk}개 있으나 목록에 연결되지 않았습니다. "
+                f"파일명이 SRT_XXX.png 형식인지 확인하세요."
+            )
+            messagebox.showwarning(
+                "새로고침",
+                f"PNG 폴더에 이미지 {n_disk}개가 있지만 목록 행에 연결되지 않았습니다.\n\n"
+                f"폴더: {png}\n"
+                f"파일명 예: SRT_077.png (대본 번호와 일치해야 미리보기에 표시됩니다).",
+            )
+        elif not n_disk:
+            status_var.set(f"PNG 폴더에 이미지가 없습니다: {png}")
         return True
 
     def run_refresh() -> None:
@@ -3290,6 +3379,20 @@ def main(
 
     row_btns = ttk.Frame(frm)
     row_btns.grid(row=13, column=0, sticky="ew", pady=(8, 0))
+    btn_refresh = tk.Button(
+        row_btns,
+        text="새로고침",
+        command=run_refresh,
+        bg="#1976D2",
+        fg="white",
+        activebackground="#1565C0",
+        activeforeground="white",
+        relief=tk.RAISED,
+        padx=12,
+        pady=2,
+        cursor="hand2",
+    )
+    btn_refresh.pack(side=tk.LEFT, padx=(0, 10))
     btn_scan = ttk.Button(row_btns, text="① 목록 조회 (OCR·매칭)", command=run_scan)
     btn_scan.pack(side=tk.LEFT, padx=(0, 10))
     btn_cancel_scan = ttk.Button(
@@ -3303,9 +3406,7 @@ def main(
     btn_normalize = ttk.Button(
         row_btns, text="파일명 정규화", command=run_normalize_filenames
     )
-    btn_normalize.pack(side=tk.LEFT, padx=(0, 10))
-    btn_refresh = ttk.Button(row_btns, text="새로고침", command=run_refresh)
-    btn_refresh.pack(side=tk.LEFT)
+    btn_normalize.pack(side=tk.LEFT)
     def on_delete_key(_event: tk.Event | None = None) -> None:
         w = root.focus_get()
         if w is not None and w.winfo_class() in ("Entry", "TEntry", "TCombobox"):
@@ -3339,7 +3440,10 @@ def main(
         srt = Path(srt_var.get().strip())
         if png.is_dir() and srt.is_file():
             _load_table_from_disk()
-        status_var.set("")
+        elif png.is_dir():
+            status_var.set("PNG 폴더 준비됨 — 대본 SRT를 지정하세요.")
+        elif srt.is_file():
+            status_var.set("SRT 준비됨 — PNG 폴더를 지정하세요.")
 
     refresh_count()
     root.after(200, startup_load_default_folder)
