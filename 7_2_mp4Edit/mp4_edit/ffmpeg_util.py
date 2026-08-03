@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import math
 import os
 import shutil
 import subprocess
@@ -227,7 +226,10 @@ def resolve_edit_dest(
     output_name: str | None = None,
     default_stem: str | None = None,
 ) -> Path:
-    """저장 디렉터리·파일명을 반영한 출력 경로."""
+    """저장 디렉터리·파일명을 반영한 출력 경로.
+
+    Windows 대소문자 무시로 입력과 같은 파일이면 ``_out`` 접미사를 붙인다.
+    """
     src = Path(src)
     base = Path(output_dir) if output_dir else src.parent
     stem = (default_stem or src.stem).strip() or "output"
@@ -236,9 +238,30 @@ def resolve_edit_dest(
     if name:
         p = Path(name)
         if p.suffix:
-            return base / name
-        return base / f"{name}{suffix}"
-    return base / f"{stem}_edit{suffix}"
+            dest = base / name
+        else:
+            dest = base / f"{name}{suffix}"
+    else:
+        dest = base / f"{stem}_edit{suffix}"
+    return ensure_dest_not_source(src, dest)
+
+
+def paths_same_file(a: Path, b: Path) -> bool:
+    """같은 파일인지 (Windows 대소문자 무시)."""
+    try:
+        ra = str(Path(a).resolve()).replace("\\", "/").lower()
+        rb = str(Path(b).resolve()).replace("\\", "/").lower()
+        return ra == rb
+    except OSError:
+        return str(a).replace("\\", "/").lower() == str(b).replace("\\", "/").lower()
+
+
+def ensure_dest_not_source(src: Path, dest: Path) -> Path:
+    """입력을 덮어쓰지 않도록 출력 경로를 조정."""
+    src, dest = Path(src), Path(dest)
+    if not paths_same_file(src, dest):
+        return dest
+    return dest.with_name(f"{dest.stem}_out{dest.suffix or '.mp4'}")
 
 
 def edit_output_path(src: Path, *, output_dir: Path | None = None) -> Path:
@@ -418,6 +441,7 @@ def crop_and_trim(
     dest = Path(dest)
     if not src.is_file():
         raise FileNotFoundError(f"영상 없음: {src}")
+    dest = ensure_dest_not_source(src, dest)
     clip_dur = _clip_duration(start_sec, end_sec)
     dest.parent.mkdir(parents=True, exist_ok=True)
     speed = normalize_speed(speed)
@@ -442,353 +466,19 @@ def crop_and_trim(
         raise RuntimeError(f"자르기 시간 초과 ({timeout}초).") from e
     elapsed = time.monotonic() - t0
     if r.returncode != 0 or not dest.is_file() or dest.stat().st_size < 512:
-        err = (r.stderr or r.stdout or "자르기 실패").strip()[:500]
+        err = (r.stderr or r.stdout or "").strip()
+        # ffmpeg 는 실패 시에도 버전 배너만 stderr 에 남기는 경우가 있음
+        if not err or err.lower().startswith("ffmpeg version"):
+            if paths_same_file(src, dest):
+                err = "출력 파일이 입력과 같습니다. 다른 파일명으로 저장하세요."
+            elif dest.is_file() and dest.stat().st_size < 512:
+                err = f"출력 파일이 비정상입니다 (크기 {dest.stat().st_size}바이트)."
+            else:
+                err = "자르기 실패 (출력 파일 없음)."
+        err = err[:500]
         mp4_edit_log(f"crop_and_trim FAIL rc={r.returncode} ({elapsed:.1f}s) err={err[:200]!r}")
         raise RuntimeError(err)
     mp4_edit_log(f"crop_and_trim ok dest={dest} size={dest.stat().st_size} ({elapsed:.1f}s)")
-    return dest
-
-
-def _concat_list_path_escape(path: Path) -> str:
-    """concat demuxer 용 경로 (슬래시, 작은따옴표 이스케이프)."""
-    s = str(path.resolve()).replace("\\", "/")
-    return s.replace("'", r"'\''")
-
-
-def _concat_mp4_files(files: list[Path], dest: Path, *, timeout: int = 3600) -> Path:
-    """동일 코덱 클립들을 concat. copy 실패 시 재인코딩."""
-    ff = ffmpeg_bin()
-    if not ff:
-        raise RuntimeError("이어붙이기에 ffmpeg 가 필요합니다 (tools/ffmpeg).")
-    if not files:
-        raise ValueError("이어붙일 파일이 없습니다.")
-    dest = Path(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    list_path = dest.with_suffix(dest.suffix + ".concat.txt")
-    list_path.write_text(
-        "".join(f"file '{_concat_list_path_escape(p)}'\n" for p in files),
-        encoding="utf-8",
-    )
-    base = [
-        str(ff),
-        "-y",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(list_path),
-    ]
-    cmd_copy = base + ["-c", "copy", "-movflags", "+faststart", str(dest)]
-    mp4_edit_log(f"concat start n={len(files)} dest={dest}")
-    t0 = time.monotonic()
-    try:
-        r = subprocess.run(
-            cmd_copy,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            **_win_subprocess_flags(),
-        )
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError(f"이어붙이기 시간 초과 ({timeout}초).") from e
-    if r.returncode != 0 or not dest.is_file() or dest.stat().st_size < 512:
-        cmd_enc = base + [
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-crf",
-            "20",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "160k",
-            "-movflags",
-            "+faststart",
-            str(dest),
-        ]
-        try:
-            r2 = subprocess.run(
-                cmd_enc,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                **_win_subprocess_flags(),
-            )
-        except subprocess.TimeoutExpired as e:
-            raise RuntimeError(f"이어붙이기 시간 초과 ({timeout}초).") from e
-        if r2.returncode != 0 or not dest.is_file() or dest.stat().st_size < 512:
-            err = (r2.stderr or r.stderr or r2.stdout or "이어붙이기 실패").strip()[:500]
-            mp4_edit_log(f"concat FAIL err={err[:200]!r}")
-            raise RuntimeError(err)
-    try:
-        list_path.unlink(missing_ok=True)
-    except OSError:
-        pass
-    mp4_edit_log(f"concat ok dest={dest} size={dest.stat().st_size} ({time.monotonic() - t0:.1f}s)")
-    return dest
-
-
-def resolve_loop_plan(
-    *,
-    loop_start: float,
-    loop_end: float,
-    total_dur: float,
-    repeat_count: int | None = None,
-    target_loop_sec: float | None = None,
-) -> tuple[int, float, float]:
-    """(반복횟수, 반복구간 출력길이, 전체 예상길이) 계산."""
-    loop_start = max(0.0, float(loop_start))
-    loop_end = float(loop_end)
-    total_dur = max(0.0, float(total_dur))
-    if total_dur > 0:
-        loop_end = min(loop_end, total_dur)
-    if loop_end <= loop_start:
-        raise ValueError("반복 구간의 종료는 시작보다 뒤여야 합니다.")
-    seg = loop_end - loop_start
-    if target_loop_sec is not None and float(target_loop_sec) > 0:
-        target = float(target_loop_sec)
-        n = max(1, int(math.ceil(target / seg - 1e-9)))
-        loop_out = target
-    else:
-        n = max(1, int(repeat_count or 2))
-        loop_out = n * seg
-    before = loop_start
-    after = max(0.0, total_dur - loop_end) if total_dur > 0 else 0.0
-    return n, loop_out, before + loop_out + after
-
-
-def _run_ffmpeg(cmd: list[str], *, timeout: int, label: str) -> None:
-    t0 = time.monotonic()
-    try:
-        r = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            **_win_subprocess_flags(),
-        )
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError(f"{label} 시간 초과 ({timeout}초).") from e
-    dest = Path(cmd[-1])
-    if r.returncode != 0 or not dest.is_file() or dest.stat().st_size < 512:
-        err = (r.stderr or r.stdout or f"{label} 실패").strip()[:600]
-        mp4_edit_log(f"{label} FAIL rc={r.returncode} err={err[:250]!r}")
-        raise RuntimeError(err)
-    mp4_edit_log(f"{label} ok dest={dest} ({time.monotonic() - t0:.1f}s)")
-
-
-def _cut_clip_fast(
-    src: Path,
-    dest: Path,
-    *,
-    start: float,
-    end: float | None,
-    timeout: int,
-) -> Path:
-    """짧은 구간만 ultrafast 재인코딩. 입력 seek + trim 으로 빠르게·정확히."""
-    ff = ffmpeg_bin()
-    if not ff:
-        raise RuntimeError("ffmpeg 가 필요합니다.")
-    dest = Path(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    start = max(0.0, float(start))
-    has_a = probe_has_audio(src)
-    # 키프레임 근처로 빠르게 점프한 뒤, trim 으로 정확한 시작·길이
-    pad = min(3.0, start)
-    seek = start - pad
-    off = pad
-    vf = f"trim=start={off:.6f},setpts=PTS-STARTPTS"
-    af = f"atrim=start={off:.6f},asetpts=PTS-STARTPTS"
-    if end is not None:
-        dur = float(end) - start
-        if dur <= 0:
-            raise ValueError("종료는 시작보다 뒤여야 합니다.")
-        vf = f"trim=start={off:.6f}:duration={dur:.6f},setpts=PTS-STARTPTS"
-        af = f"atrim=start={off:.6f}:duration={dur:.6f},asetpts=PTS-STARTPTS"
-    cmd = [
-        str(ff),
-        "-y",
-        "-ss",
-        f"{seek:.6f}",
-        "-i",
-        str(src),
-        "-vf",
-        vf,
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-crf",
-        "20",
-        "-pix_fmt",
-        "yuv420p",
-    ]
-    if has_a:
-        cmd.extend(["-af", af, "-c:a", "aac", "-b:a", "160k"])
-    else:
-        cmd.append("-an")
-    cmd.extend(["-movflags", "+faststart", str(dest)])
-    _run_ffmpeg(cmd, timeout=timeout, label="cut_clip_fast")
-    return dest
-
-
-def _xfade_n_copies(
-    mid: Path,
-    n: int,
-    dest: Path,
-    *,
-    seg_dur: float,
-    fade: float,
-    timeout: int,
-) -> Path:
-    """동일 클립 n개를 크로스페이드로 이어붙임."""
-    ff = ffmpeg_bin()
-    if not ff:
-        raise RuntimeError("ffmpeg 가 필요합니다.")
-    n = max(1, int(n))
-    dest = Path(dest)
-    if n == 1 or fade <= 1e-3:
-        if n == 1:
-            shutil.copy2(mid, dest)
-            return dest
-        return _concat_mp4_files([mid] * n, dest, timeout=timeout)
-    fade = min(float(fade), max(0.05, seg_dur * 0.4))
-    has_a = probe_has_audio(mid)
-    cmd: list[str] = [str(ff), "-y"]
-    for _ in range(n):
-        cmd.extend(["-i", str(mid)])
-    fc: list[str] = []
-    # video chain
-    for i in range(1, n):
-        inp_a = "[0:v]" if i == 1 else f"[vx{i - 1}]"
-        inp_b = f"[{i}:v]"
-        out = "[vout]" if i == n - 1 else f"[vx{i}]"
-        off = i * (seg_dur - fade)
-        fc.append(
-            f"{inp_a}{inp_b}xfade=transition=fade:duration={fade:.4f}:offset={off:.4f}{out}"
-        )
-    maps = ["-map", "[vout]"]
-    if has_a:
-        for i in range(1, n):
-            inp_a = "[0:a]" if i == 1 else f"[ax{i - 1}]"
-            inp_b = f"[{i}:a]"
-            out = "[aout]" if i == n - 1 else f"[ax{i}]"
-            fc.append(f"{inp_a}{inp_b}acrossfade=d={fade:.4f}{out}")
-        maps.extend(["-map", "[aout]"])
-        audio_args = ["-c:a", "aac", "-b:a", "160k"]
-    else:
-        audio_args = ["-an"]
-    cmd.extend(
-        [
-            "-filter_complex",
-            ";".join(fc),
-            *maps,
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-crf",
-            "20",
-            "-pix_fmt",
-            "yuv420p",
-            *audio_args,
-            "-movflags",
-            "+faststart",
-            str(dest),
-        ]
-    )
-    _run_ffmpeg(cmd, timeout=timeout, label="xfade_loop")
-    return dest
-
-
-def loop_segment_in_video(
-    src: Path,
-    dest: Path,
-    *,
-    loop_start: float,
-    loop_end: float,
-    repeat_count: int | None = None,
-    target_loop_sec: float | None = None,
-    crossfade_sec: float = 0.0,
-    timeout: int = 3600,
-) -> Path:
-    """선택 구간만 잘라 반복(짧게 인코딩)하고 앞·뒤와 이어붙임.
-
-    ``crossfade_sec`` > 0 이면 반복 이음새에 짧은 크로스페이드를 넣는다.
-    """
-    src = Path(src)
-    dest = Path(dest)
-    if not src.is_file():
-        raise FileNotFoundError(f"영상 없음: {src}")
-    total = probe_duration(src) or 0.0
-    n, loop_out, _est = resolve_loop_plan(
-        loop_start=loop_start,
-        loop_end=loop_end,
-        total_dur=total,
-        repeat_count=repeat_count,
-        target_loop_sec=target_loop_sec,
-    )
-    loop_start = max(0.0, float(loop_start))
-    loop_end = float(loop_end)
-    if total > 0:
-        loop_end = min(loop_end, total)
-    seg = loop_end - loop_start
-    if seg <= 0:
-        raise ValueError("반복 구간의 종료는 시작보다 뒤여야 합니다.")
-    fade = max(0.0, float(crossfade_sec or 0.0))
-    if fade > 0:
-        fade = min(fade, seg * 0.4)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    mp4_edit_log(
-        f"loop_segment fast src={src} dest={dest} loop={loop_start:.3f}-{loop_end:.3f} "
-        f"n={n} loop_out={loop_out:.3f} fade={fade:.3f} total={total:.3f}"
-    )
-    t0 = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix="mp4_edit_loop_") as td_raw:
-        td = Path(td_raw)
-        pieces: list[Path] = []
-        if loop_start > 1e-3:
-            before = td / "before.mp4"
-            _cut_clip_fast(src, before, start=0.0, end=loop_start, timeout=timeout)
-            pieces.append(before)
-        mid = td / "mid.mp4"
-        _cut_clip_fast(src, mid, start=loop_start, end=loop_end, timeout=timeout)
-        # 페이드 시 출력 길이 ≈ n*seg - (n-1)*fade
-        faded_len = n * seg - max(0, n - 1) * fade if fade > 0 and n > 1 else n * seg
-        need_trim_loop = abs(faded_len - loop_out) > 0.08
-        if fade > 0 and n > 1:
-            loop_body = td / "loop_fade.mp4"
-            _xfade_n_copies(mid, n, loop_body, seg_dur=seg, fade=fade, timeout=timeout)
-            if need_trim_loop and loop_out < faded_len - 0.05:
-                loop_clip = td / "loop.mp4"
-                _cut_clip_fast(loop_body, loop_clip, start=0.0, end=loop_out, timeout=timeout)
-                pieces.append(loop_clip)
-            else:
-                pieces.append(loop_body)
-        else:
-            if need_trim_loop:
-                loop_raw = td / "loop_raw.mp4"
-                _concat_mp4_files([mid] * n, loop_raw, timeout=timeout)
-                loop_clip = td / "loop.mp4"
-                _cut_clip_fast(loop_raw, loop_clip, start=0.0, end=loop_out, timeout=timeout)
-                pieces.append(loop_clip)
-            else:
-                pieces.extend([mid] * n)
-        if total > 0 and loop_end < total - 1e-3:
-            after = td / "after.mp4"
-            _cut_clip_fast(src, after, start=loop_end, end=None, timeout=timeout)
-            pieces.append(after)
-        if len(pieces) == 1:
-            shutil.copy2(pieces[0], dest)
-        else:
-            _concat_mp4_files(pieces, dest, timeout=timeout)
-    if not dest.is_file() or dest.stat().st_size < 512:
-        raise RuntimeError("구간 반복 저장에 실패했습니다.")
-    mp4_edit_log(
-        f"loop_segment ok dest={dest} size={dest.stat().st_size} ({time.monotonic() - t0:.1f}s)"
-    )
     return dest
 
 

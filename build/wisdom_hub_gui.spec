@@ -11,6 +11,7 @@ _module_dirs = (
     "1_1_textTo700Text",
     "2_1_ttsToVoice",
     "2_2_imgDown",
+    "2_3_sceneImage",
     "3_1_pngFileName",
     "3_2_pngToJpg",
     "4_2_ShortVideo",
@@ -51,6 +52,7 @@ if os.path.isfile(_example):
 _hidden_pkgs = (
     "elsub",
     "img_down",
+    "scene_image",
     "png_rename",
     "png2jpg",
     "shortvid",

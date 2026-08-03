@@ -26,12 +26,16 @@ from tkinter import filedialog, font as tkfont, messagebox, scrolledtext, ttk
 from elsub import __version__
 from elsub.input_loader import load_tts_text_from_dir
 from elsub.elevenlabs_client import (
+    api_text_has_speech,
     concat_mp3_files,
     concat_mp3_files_binary_from_paths,
     concat_mp3_files_ffmpeg,
+    prepare_tts_for_api,
     prepend_silence_mp3,
+    silence_sec_from_prepared,
     strip_tts_tags,
     synthesize_mp3,
+    write_silence_mp3,
 )
 from elsub.media_probe import ffprobe_duration_sec
 from elsub.parser import CaptionLine, parse_knowledgetts_block
@@ -677,11 +681,59 @@ def main(
                             status.set(f"음성 합성… {part_lbl} ({n}/{total_lines})")
 
                         safe_after(root, upd)
-                        blob = synthesize_mp3(key, vid, api_tts, model_id=model)
                         seg_p = seg_root / f"{part_lbl}_{gidx:04d}.mp3"
-                        seg_p.write_bytes(blob)
-                        if pre_pause_ms:
-                            prepend_silence_mp3(seg_p, pre_pause_ms / 1000.0)
+                        plain_api = prepare_tts_for_api(api_tts)
+                        use_silence = not plain_api or not api_text_has_speech(
+                            plain_api
+                        )
+                        if use_silence:
+                            # [breathes]·"......" 등 낭독 글자 없음 → API 없이 무음
+                            sil_ms = pre_pause_ms
+                            if not sil_ms:
+                                sil_ms = int(
+                                    round(
+                                        silence_sec_from_prepared(plain_api) * 1000
+                                    )
+                                )
+                            sil_ms = max(50, sil_ms)
+                            write_silence_mp3(seg_p, sil_ms / 1000.0)
+                            blob = seg_p.read_bytes()
+                            safe_after(
+                                root,
+                                lambda p=part_lbl, i=gidx, m=sil_ms: log_line(
+                                    f"[{p}_{i:04d}] 낭독 텍스트 없음 → 무음 {m}ms"
+                                ),
+                            )
+                        else:
+                            try:
+                                blob = synthesize_mp3(
+                                    key, vid, api_tts, model_id=model
+                                )
+                            except RuntimeError as syn_err:
+                                err_s = str(syn_err)
+                                # 빈 MP3 응답만 무음 폴백(크레딧·네트워크 일시 오류)
+                                if "빈·비정상 MP3" not in err_s and "0 bytes" not in err_s:
+                                    raise
+                                sil_ms = max(
+                                    pre_pause_ms,
+                                    estimate_duration_ms(merged_tts),
+                                    500,
+                                )
+                                write_silence_mp3(seg_p, sil_ms / 1000.0)
+                                blob = seg_p.read_bytes()
+                                safe_after(
+                                    root,
+                                    lambda p=part_lbl, i=gidx, e=err_s, m=sil_ms: log_line(
+                                        f"[{p}_{i:04d}] API 빈응답 → 무음 {m}ms ({e})"
+                                    ),
+                                )
+                            else:
+                                seg_p.write_bytes(blob)
+                                if pre_pause_ms:
+                                    prepend_silence_mp3(
+                                        seg_p, pre_pause_ms / 1000.0
+                                    )
+                                    blob = seg_p.read_bytes()
                         part_seg_paths.append(seg_p)
                         part_seg_blobs.append(blob)
 

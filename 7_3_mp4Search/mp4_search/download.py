@@ -2000,6 +2000,82 @@ def _maybe_burn_segment_subtitles(
     return False, _ffmpeg_error_detail(err_text, "자막 번인 실패")
 
 
+def overlay_announcer_circle(
+    video: Path,
+    announcer: Path,
+    dest: Path,
+    *,
+    cancel_event: threading.Event | None = None,
+    on_progress: Callable[[float], None] | None = None,
+    size_ratio: float = 0.09,
+    margin_px: int = 8,
+) -> Path:
+    """메인 영상 우측 하단 코너에 아나운서 MP4를 원형 PiP로 오버레이 (음성 제외·루프)."""
+    video = Path(video)
+    announcer = Path(announcer)
+    dest = Path(dest)
+    if not video.is_file():
+        raise FileNotFoundError(str(video))
+    if not announcer.is_file():
+        raise FileNotFoundError(str(announcer))
+    ff = _ffmpeg_bin()
+    if not ff:
+        raise RuntimeError("아나운서 오버레이에 ffmpeg 가 필요합니다 (tools/ffmpeg).")
+    size = _probe_video_size(video) or (1280, 720)
+    # 이전 대비 ~50% (ratio 0.18→0.09), 우측 하단 코너에 붙임
+    pip = max(48, min(160, int(min(size) * float(size_ratio))))
+    if pip % 2:
+        pip += 1
+    margin = max(4, int(margin_px))
+    dur = _probe_media_duration(video)
+    has_audio = _probe_has_audio_stream(video)
+    # 원형 알파 마스크 + 우측 하단 overlay (아나운서 오디오는 사용 안 함)
+    fc = (
+        f"[1:v]scale={pip}:{pip}:force_original_aspect_ratio=increase,"
+        f"crop={pip}:{pip},format=yuva420p,"
+        f"geq=lum='p(X,Y)':cb='p(X,Y)':cr='p(X,Y)':"
+        f"a='if(lte(hypot(X-W/2,Y-H/2),W/2-1),255,0)'[pip];"
+        f"[0:v][pip]overlay=W-w-{margin}:H-h-{margin}:format=auto:shortest=1[vout]"
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    cmd: list[str] = [
+        str(ff),
+        "-y",
+        "-progress",
+        "pipe:1",
+        "-nostats",
+        "-i",
+        str(video.resolve()),
+        "-stream_loop",
+        "-1",
+        "-i",
+        str(announcer.resolve()),
+        "-filter_complex",
+        fc,
+        "-map",
+        "[vout]",
+    ]
+    if has_audio:
+        cmd.extend(["-map", "0:a:0?", "-c:a", "aac", "-b:a", "192k", "-shortest"])
+    else:
+        cmd.append("-an")
+    cmd.extend(_video_only_encode_args(preset="veryfast", cfr_fps=30))
+    if dur and dur > 0:
+        cmd.extend(["-t", f"{dur:.3f}"])
+    cmd.append(str(dest.resolve()))
+    cancelled, err_text = _run_ffmpeg_compose(
+        cmd,
+        cancel_event=cancel_event,
+        duration_sec=dur,
+        on_progress=on_progress,
+    )
+    if cancelled:
+        raise ComposeStopped(dest if dest.is_file() else None, "아나운서 오버레이 중지")
+    if not dest.is_file() or dest.stat().st_size < 512:
+        raise RuntimeError(_ffmpeg_error_detail(err_text, "아나운서 오버레이 실패"))
+    return dest
+
+
 def compose_timeline_to_all_mp4(
     jobs: list,
     dest: Path,
@@ -2008,6 +2084,8 @@ def compose_timeline_to_all_mp4(
     audio_mp3: Path | None = None,
     srt_path: Path | None = None,
     burn_subtitles: bool = True,
+    add_announcer: bool = True,
+    announcer_mp4: Path | None = None,
     cancel_event: threading.Event | None = None,
     on_progress: ComposeProgressFn | None = None,
     on_log: ComposeLogFn | None = None,
@@ -2198,6 +2276,53 @@ def compose_timeline_to_all_mp4(
         if not video_dest.is_file():
             raise
     _log(f"[연결 완료] {video_dest.name}")
+
+    # 우측 하단 원형 아나운서 (concat 후 · MP3 mux 전)
+    if add_announcer:
+        from mp4_search.paths import resolve_announcer_mp4
+
+        if announcer_mp4 and Path(announcer_mp4).is_file():
+            ann_path = Path(announcer_mp4)
+        else:
+            ann_path = resolve_announcer_mp4(
+                str(announcer_mp4) if announcer_mp4 else ""
+            )
+        if ann_path is None or not ann_path.is_file():
+            _log(
+                "[경고] 아나운서 파일 없음 — 건너뜀 "
+                r"(C:\무협극장\anouncer\*.mp4)"
+            )
+        else:
+            pip_dest = work_dir / "_concat_announcer.mp4"
+            _log(f"[아나운서 오버레이] {ann_path.name} → 우측하단 원형")
+
+            def pip_progress(pct: float) -> None:
+                # concat 직후 구간에서 살짝 진행 표시
+                overall = segment_weight * 100.0 + concat_weight * 100.0 * 0.85 + pct * 0.05
+                report(min(99.0, overall), None, 0)
+
+            try:
+                overlay_announcer_circle(
+                    video_dest,
+                    ann_path,
+                    pip_dest,
+                    cancel_event=finish_cancel,
+                    on_progress=pip_progress,
+                )
+                if video_dest != dest and video_dest.is_file() and video_dest != pip_dest:
+                    video_dest.unlink(missing_ok=True)
+                video_dest = pip_dest
+                _log(f"[아나운서 오버레이 완료] {pip_dest.name}")
+            except ComposeStopped:
+                stopped = True
+                if pip_dest.is_file() and pip_dest.stat().st_size >= 512:
+                    if video_dest != dest and video_dest.is_file() and video_dest != pip_dest:
+                        video_dest.unlink(missing_ok=True)
+                    video_dest = pip_dest
+                elif not video_dest.is_file():
+                    raise
+            except Exception as e:
+                _log(f"[경고] 아나운서 오버레이 실패 — 본편만 유지\n  {e}")
 
     if mux_mp3:
         report((segment_weight + concat_weight) * 100.0, None, -1)

@@ -69,9 +69,11 @@ from mp4_search.timeline_compose import (
 )
 from mp4_search.paths import (
     default_output_dir,
+    list_announcer_mp4s,
     media_dirs_for_srt,
     mp3_candidates_for_srt,
     pick_default_srt_mp3,
+    resolve_announcer_mp4,
     resolve_mp3_for_srt,
     stock_api_config_write_path,
 )
@@ -181,6 +183,19 @@ def main(*, container: tk.Misc | None = None) -> None:
 
     srt_var = tk.StringVar(value=srt_init)
     burn_sub_c = tk.BooleanVar(value=cfg.get("burn_subtitles", "1") != "0")
+    add_announcer_c = tk.BooleanVar(value=cfg.get("add_announcer", "1") != "0")
+    _ann_files0 = list_announcer_mp4s()
+    _ann_names0 = [p.name for p in _ann_files0]
+    _ann_saved = (cfg.get("announcer_file") or "").strip()
+    if _ann_saved:
+        _ann_init = Path(_ann_saved).name
+        if _ann_init not in _ann_names0 and _ann_names0:
+            _ann_init = _ann_names0[0]
+        elif _ann_init not in _ann_names0:
+            _ann_init = _ann_saved
+    else:
+        _ann_init = _ann_names0[0] if _ann_names0 else ""
+    announcer_var = tk.StringVar(value=_ann_init)
     mp4_var = tk.StringVar(value=cfg.get("mp4_dir", "") or str(default_output_dir()))
     mp3_var = tk.StringVar(value=mp3_init)
     download_default = cfg.get("download_dir") or str(Path.home() / "Downloads")
@@ -217,6 +232,8 @@ def main(*, container: tk.Misc | None = None) -> None:
             mp3_file=mp3_var.get().strip(),
             preview_pane_width=str(preview_pane_w),
             burn_subtitles=bool(burn_sub_c.get()),
+            add_announcer=bool(add_announcer_c.get()),
+            announcer_file=announcer_var.get().strip(),
         )
         save_mp4_play_modes(mp4_play_modes)
 
@@ -441,12 +458,47 @@ def main(*, container: tk.Misc | None = None) -> None:
 
     ttk.Button(path_fr, text="찾기…", command=pick_mp3).grid(row=3, column=2, pady=(6, 0))
 
+    chk_fr = ttk.Frame(path_fr)
+    chk_fr.grid(row=4, column=1, sticky="ew", padx=(4, 0), pady=(6, 0))
     ttk.Checkbutton(
-        path_fr,
+        chk_fr,
         text="영상에 자막추가",
         variable=burn_sub_c,
         command=persist,
-    ).grid(row=4, column=1, sticky="w", padx=(4, 0), pady=(6, 0))
+    ).pack(side=tk.LEFT)
+    ttk.Checkbutton(
+        chk_fr,
+        text="아나운서추가",
+        variable=add_announcer_c,
+        command=persist,
+    ).pack(side=tk.LEFT, padx=(16, 0))
+    announcer_cb = ttk.Combobox(
+        chk_fr,
+        textvariable=announcer_var,
+        values=_ann_names0,
+        width=22,
+        state="readonly" if _ann_names0 else "disabled",
+    )
+    announcer_cb.pack(side=tk.LEFT, padx=(8, 0))
+
+    def refresh_announcer_list() -> None:
+        files = list_announcer_mp4s()
+        names = [p.name for p in files]
+        announcer_cb.configure(
+            values=names,
+            state="readonly" if names else "disabled",
+        )
+        cur = announcer_var.get().strip()
+        if names and cur not in names:
+            announcer_var.set(names[0])
+        elif not names:
+            announcer_var.set("")
+        persist()
+
+    ttk.Button(chk_fr, text="새로고침", width=8, command=refresh_announcer_list).pack(
+        side=tk.LEFT, padx=(6, 0)
+    )
+    announcer_cb.bind("<<ComboboxSelected>>", lambda _e: persist())
 
     def _on_srt_path_set(_p: str) -> None:
         apply_media_paths_from_srt(force_mp3=True)
@@ -2618,6 +2670,7 @@ def main(*, container: tk.Misc | None = None) -> None:
                 if srt_path and not srt_path.is_file():
                     srt_path = None
                 try:
+                    ann_sel = resolve_announcer_mp4(announcer_var.get().strip())
                     result_path = compose_timeline_to_all_mp4(
                         jobs,
                         dest,
@@ -2625,6 +2678,8 @@ def main(*, container: tk.Misc | None = None) -> None:
                         audio_mp3=mp3_path,
                         srt_path=srt_path,
                         burn_subtitles=bool(burn_sub_c.get()),
+                        add_announcer=bool(add_announcer_c.get()),
+                        announcer_mp4=ann_sel,
                         cancel_event=compose_cancel,
                         on_progress=on_overall,
                         on_log=on_log,

@@ -10,6 +10,13 @@ _SRT_STEM = re.compile(r"^srt[-_]?0*(\d+)\.mp4$", re.IGNORECASE)
 _SRT_ASSET = re.compile(r"^srt[-_]?0*(\d+)\.(mp4|png|jpe?g|webp|gif)$", re.IGNORECASE)
 _IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif"})
 ALL_MP4_NAME = "all.mp4"
+# 썸네일 전용 — 타임라인 합성·마크·길이 계산에서 제외
+THUMBNAIL_ASSET_NUMBER = 9999
+
+
+def is_thumbnail_asset(number: int) -> bool:
+    """``SRT_9999`` — 썸네일 화면용, 합성에 포함하지 않음."""
+    return int(number) == THUMBNAIL_ASSET_NUMBER
 
 
 def timeline_asset_number(start_sec: float) -> int:

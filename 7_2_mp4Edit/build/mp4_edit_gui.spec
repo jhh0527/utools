@@ -29,7 +29,6 @@ a = Analysis(
         "mp4_edit",
         "mp4_edit.gui_app",
         "mp4_edit.ffmpeg_util",
-        "mp4_edit.loop_auto",
         "mp4_edit.settings",
         "mp4_edit.paths",
         "mp4_edit.youtube_util",

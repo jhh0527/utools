@@ -10,6 +10,44 @@ from wisdom_workspace import workspace_module_output
 
 MODULE = "7_3_mp4Search"
 
+# 우측 하단 원형 아나운서 PiP — C:\무협극장\anouncer\*.mp4
+ANNOUNCER_DIR = Path(r"C:\무협극장\anouncer")
+# 레거시 단일 파일 (폴더에 없을 때 폴백)
+DEFAULT_ANNOUNCER_MP4 = Path(r"C:\무협극장\middleageAnouncer.mp4")
+
+
+def list_announcer_mp4s() -> list[Path]:
+    """``ANNOUNCER_DIR`` 아래 *.mp4 (이름순). 없으면 레거시 단일 파일."""
+    out: list[Path] = []
+    if ANNOUNCER_DIR.is_dir():
+        out = sorted(
+            (p for p in ANNOUNCER_DIR.glob("*.mp4") if p.is_file()),
+            key=lambda p: p.name.lower(),
+        )
+    if out:
+        return out
+    if DEFAULT_ANNOUNCER_MP4.is_file():
+        return [DEFAULT_ANNOUNCER_MP4]
+    return []
+
+
+def resolve_announcer_mp4(name_or_path: str = "") -> Path | None:
+    """선택 이름/경로 → 실제 파일. 비어 있으면 목록 첫 항목."""
+    raw = (name_or_path or "").strip()
+    files = list_announcer_mp4s()
+    if raw:
+        p = Path(raw)
+        if p.is_file():
+            return p
+        # 파일명만 저장된 경우
+        cand = ANNOUNCER_DIR / Path(raw).name
+        if cand.is_file():
+            return cand
+        for f in files:
+            if f.name.lower() == Path(raw).name.lower():
+                return f
+    return files[0] if files else None
+
 
 def default_output_dir() -> Path:
     return workspace_module_output(MODULE) / "mp4"

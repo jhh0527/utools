@@ -168,9 +168,9 @@ def configure_notebook_tabs(host: tk.Misc, *, font_size: int | None = None) -> N
         base_sz = abs(raw_sz) if raw_sz else 9
     except tk.TclError:
         fam, base_sz = "맑은 고딕", 9
-    sz = font_size if font_size is not None else max(9, base_sz - 1)
+    sz = font_size if font_size is not None else max(8, base_sz - 2)
     style = ttk.Style(host)
-    style.configure("TNotebook.Tab", font=(fam, sz, "bold"), padding=(12, 3))
+    style.configure("TNotebook.Tab", font=(fam, sz, "bold"), padding=(8, 2))
 
 
 def _decode_drop_path(raw: bytes | str) -> str:

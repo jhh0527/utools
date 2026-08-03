@@ -1,0 +1,10 @@
+dist/
+build/work/
+__pycache__/
+*.pyc
+.genspark_scene_image_profile/
+scene_image_gui_config.json
+scene_image_credentials.json
+**/scene_image_credentials.json
+storage_state.json
+**/storage_state.json

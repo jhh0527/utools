@@ -6,7 +6,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from mp4_search.naming import ALL_MP4_NAME, scan_srt_assets, timeline_asset_number, parse_srt_asset_number
+from mp4_search.naming import (
+    ALL_MP4_NAME,
+    is_thumbnail_asset,
+    parse_srt_asset_number,
+    scan_srt_assets,
+    timeline_asset_number,
+)
 
 
 @dataclass(frozen=True)
@@ -52,15 +58,21 @@ def merge_asset_maps(
 
     _merge(extra_mp4, mp4)
     _merge(extra_png, png)
+    # SRT_9999 썸네일은 합성 맵에서 제외
+    mp4 = {k: v for k, v in mp4.items() if not is_thumbnail_asset(k)}
+    png = {k: v for k, v in png.items() if not is_thumbnail_asset(k)}
     return mp4, png
 
 
 def pick_asset_at_timeline(asset_map: dict[int, Path], timeline_sec: int) -> tuple[int, Path] | None:
-    """파일 번호 ≤ ``timeline_sec`` 인 자산 중 **가장 큰** 번호 (4_1_video 이미지 매칭과 동일)."""
+    """파일 번호 ≤ ``timeline_sec`` 인 자산 중 **가장 큰** 번호 (4_1_video 이미지 매칭과 동일).
+
+    ``SRT_9999`` 썸네일은 후보에서 제외.
+    """
     if not asset_map:
         return None
     t = max(0, int(timeline_sec))
-    leq = [n for n in asset_map if n <= t]
+    leq = [n for n in asset_map if n <= t and not is_thumbnail_asset(n)]
     if not leq:
         return None
     key = max(leq)
@@ -157,11 +169,13 @@ def timeline_mark_asset_keys(
     png_map: dict[int, Path],
     asset_start_times: dict[int, float] | None,
 ) -> set[int]:
-    """합성 타임라인 마크 — MP4 우선, MP4 없으면 이미지 파일 번호."""
+    """합성 타임라인 마크 — MP4 우선, MP4 없으면 이미지 파일 번호.
+
+    ``SRT_9999``(썸네일)는 제외.
+    """
     _ = asset_start_times
-    if mp4_map:
-        return set(mp4_map.keys())
-    return set(png_map.keys())
+    keys = set(mp4_map.keys()) if mp4_map else set(png_map.keys())
+    return {k for k in keys if not is_thumbnail_asset(k)}
 
 
 def lookup_mark_schedule(schedule: dict[float, int], mark_sec: float) -> int | None:
@@ -192,9 +206,11 @@ def png_mark_schedule(
     png_map: dict[int, Path],
     asset_start_times: dict[int, float] | None,
 ) -> dict[float, int]:
-    """타임라인 시작 시각 → PNG 파일 번호."""
+    """타임라인 시작 시각 → PNG 파일 번호 (``SRT_9999`` 썸네일 제외)."""
     schedule: dict[float, int] = {}
     for k in sorted(png_map.keys()):
+        if is_thumbnail_asset(k):
+            continue
         schedule[asset_timeline_mark(k, asset_start_times)] = int(k)
     return schedule
 
@@ -360,8 +376,12 @@ def png_overlay_mark_times(
     png_map: dict[int, Path],
     asset_start_times: dict[int, float] | None,
 ) -> set[float]:
-    """PNG 시작 시각 — MP4와 번호가 달라도 구간 분할용."""
-    return {asset_timeline_mark(k, asset_start_times) for k in png_map}
+    """PNG 시작 시각 — MP4와 번호가 달라도 구간 분할용 (썸네일 제외)."""
+    return {
+        asset_timeline_mark(k, asset_start_times)
+        for k in png_map
+        if not is_thumbnail_asset(k)
+    }
 
 
 def _list_image_only_compose_jobs(
@@ -390,6 +410,8 @@ def _list_image_only_compose_jobs(
 
     mark_schedule: dict[float, int] = {}
     for k in sorted(png_map.keys()):
+        if is_thumbnail_asset(k):
+            continue
         mark_schedule[asset_timeline_mark(k, asset_start_times)] = int(k)
 
     marks = sorted({0.0, float(total_end), *mark_schedule.keys()})
@@ -402,7 +424,7 @@ def _list_image_only_compose_jobs(
         switch_key = lookup_mark_schedule(mark_schedule, start)
         start_i = switch_key if switch_key is not None else int(start)
 
-        if switch_key is not None and switch_key in png_map:
+        if switch_key is not None and switch_key in png_map and not is_thumbnail_asset(switch_key):
             img_key, image = switch_key, png_map[switch_key]
         else:
             hit_i = pick_asset_at_timeline(png_map, start_i)
@@ -496,8 +518,13 @@ def list_timeline_compose_jobs(
     )
     mark_schedule = asset_mark_schedule(mp4_map, png_map, asset_start_times)
     png_schedule = png_mark_schedule(png_map, asset_start_times)
-    if mark_schedule:
-        total_end = max(total_end, max(mark_schedule.keys()) + 1.0)
+    # 마크는 본편(SRT/MP3) 길이까지만 — 썸네일·미래 번호로 타임라인을 늘리지 않음
+    if mark_schedule and total_end > 0.05:
+        in_range = [t for t in mark_schedule if t <= total_end + 0.001]
+        if in_range:
+            total_end = max(total_end, max(in_range) + 1.0)
+    elif mark_schedule:
+        total_end = max(mark_schedule.keys()) + 1.0
     if total_end <= 0.05:
         return []
 
@@ -918,6 +945,15 @@ def format_compose_debug_log(
         lines.append("[타임라인 마크 (시작초 → 파일번호)]")
         for t in sorted(schedule):
             lines.append(f"  {t:g}초 → SRT_{schedule[t]:03d}")
+    thumb_keys = sorted(
+        k for k in set(mp4_map) | set(png_map) if is_thumbnail_asset(k)
+    )
+    if thumb_keys:
+        lines.append("")
+        lines.append(
+            "[썸네일 — 합성 제외] "
+            + ", ".join(f"SRT_{k:03d}" for k in thumb_keys)
+        )
 
     missing = missing_timeline_mp4_slots(mp4_map, asset_start_times)
     if missing:

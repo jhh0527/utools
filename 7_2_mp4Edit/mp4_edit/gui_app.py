@@ -3,14 +3,12 @@
 
 from __future__ import annotations
 
-import os
 import sys
-import tempfile
 import threading
 import tkinter as tk
 import webbrowser
 from pathlib import Path
-from tkinter import filedialog, font as tkfont, messagebox, ttk
+from tkinter import filedialog, font as tkfont, ttk
 
 from mp4_edit import __version__
 from mp4_edit.ffmpeg_util import (
@@ -21,17 +19,15 @@ from mp4_edit.ffmpeg_util import (
     extract_timeline_frame,
     ffmpeg_bin,
     ffprobe_bin,
-    loop_segment_in_video,
     normalize_speed,
+    paths_same_file,
     probe_duration,
     probe_video_size,
     resolve_edit_dest,
-    resolve_loop_plan,
     speed_stem_suffix,
     temp_preview_png,
     temp_timeline_dir,
 )
-from mp4_edit.loop_auto import DEFAULT_MIN_SCORE, find_loop_points, list_mp4_files
 from mp4_edit.log_util import log_file_display, mp4_edit_log, mp4_edit_log_exc
 from mp4_edit.paths import default_output_dir
 from mp4_edit.settings import load_gui_settings, save_gui_settings
@@ -207,10 +203,7 @@ def main(*, container: tk.Misc | None = None) -> None:
         btn_cancel_load.configure(state=tk.NORMAL if loading else tk.DISABLED)
         btn_crop.configure(state=tk.DISABLED if locked else tk.NORMAL)
         btn_crop_10.configure(state=tk.DISABLED if locked else tk.NORMAL)
-        btn_loop.configure(state=tk.DISABLED if locked else tk.NORMAL)
-        btn_loop_auto.configure(state=tk.DISABLED if locked else tk.NORMAL)
-        btn_loop_preview.configure(state=tk.DISABLED if locked else tk.NORMAL)
-        btn_loop_batch.configure(state=tk.DISABLED if locked else tk.NORMAL)
+        btn_slow.configure(state=tk.DISABLED if locked else tk.NORMAL)
 
     def set_busy(busy: bool) -> None:
         state["busy"] = busy
@@ -397,48 +390,12 @@ def main(*, container: tk.Misc | None = None) -> None:
         ttk.Radiobutton(speed_fr, text=label, variable=speed_var, value=key).pack(
             side=tk.LEFT, padx=(0, 10)
         )
-    ttk.Label(speed_fr, textvariable=speed_hint_var).pack(side=tk.LEFT, padx=(8, 0))
-
-    loop_mode_var = tk.StringVar(value="count")  # count | sec
-    loop_value_var = tk.StringVar(value="3")
-    loop_hint_var = tk.StringVar(value="")
-    loop_unit_var = tk.StringVar(value="번")
-    loop_fade_var = tk.BooleanVar(value=True)
-    loop_fr = ttk.Frame(frm)
-    loop_fr.grid(row=8, column=0, sticky="ew", pady=(0, 4))
-    ttk.Label(loop_fr, text="구간 반복", width=8).pack(side=tk.LEFT)
-    ttk.Radiobutton(loop_fr, text="몇 번", variable=loop_mode_var, value="count").pack(
-        side=tk.LEFT, padx=(0, 6)
-    )
-    ttk.Radiobutton(loop_fr, text="몇 초", variable=loop_mode_var, value="sec").pack(
-        side=tk.LEFT, padx=(0, 8)
-    )
-    ttk.Entry(loop_fr, textvariable=loop_value_var, width=6).pack(side=tk.LEFT)
-    ttk.Label(loop_fr, textvariable=loop_unit_var, width=3).pack(side=tk.LEFT, padx=(4, 8))
-    ttk.Checkbutton(loop_fr, text="이음새 페이드", variable=loop_fade_var).pack(
-        side=tk.LEFT, padx=(0, 10)
-    )
-    btn_loop = ttk.Button(loop_fr, text="반복 저장")
-    btn_loop.pack(side=tk.LEFT, padx=(0, 6))
-    ttk.Label(loop_fr, textvariable=loop_hint_var).pack(side=tk.LEFT)
-
-    loop_auto_fr = ttk.Frame(frm)
-    loop_auto_fr.grid(row=9, column=0, sticky="ew", pady=(0, 6))
-    ttk.Label(loop_auto_fr, text="", width=8).pack(side=tk.LEFT)
-    btn_loop_auto = ttk.Button(loop_auto_fr, text="자동 찾기")
-    btn_loop_auto.pack(side=tk.LEFT, padx=(0, 6))
-    btn_loop_preview = ttk.Button(loop_auto_fr, text="미리보기")
-    btn_loop_preview.pack(side=tk.LEFT, padx=(0, 6))
-    btn_loop_batch = ttk.Button(loop_auto_fr, text="폴더 일괄")
-    btn_loop_batch.pack(side=tk.LEFT, padx=(0, 10))
-    ttk.Label(
-        loop_auto_fr,
-        text="자동 찾기=시작 기준 종료점 · 실패 시 수동 조정",
-        foreground="#555555",
-    ).pack(side=tk.LEFT)
+    btn_slow = ttk.Button(speed_fr, text="느리게 저장")
+    btn_slow.pack(side=tk.LEFT, padx=(0, 10))
+    ttk.Label(speed_fr, textvariable=speed_hint_var).pack(side=tk.LEFT, padx=(0, 0))
 
     btn_fr = ttk.Frame(frm)
-    btn_fr.grid(row=10, column=0, sticky="ew")
+    btn_fr.grid(row=8, column=0, sticky="ew")
     btn_reset_start = ttk.Button(btn_fr, text="시작 초기화")
     btn_reset_start.pack(side=tk.LEFT, padx=(0, 6))
     btn_reset_end = ttk.Button(btn_fr, text="종료 초기화")
@@ -452,7 +409,7 @@ def main(*, container: tk.Misc | None = None) -> None:
     ttk.Button(btn_fr, text="Filmot", command=lambda: webbrowser.open(_FILMOT_URL)).pack(side=tk.LEFT, padx=(0, 6))
     ttk.Button(btn_fr, text="YouGlish", command=lambda: webbrowser.open(_YOUGLISH_URL)).pack(side=tk.LEFT)
 
-    ttk.Label(frm, textvariable=status_var).grid(row=11, column=0, sticky="w", pady=(8, 0))
+    ttk.Label(frm, textvariable=status_var).grid(row=9, column=0, sticky="w", pady=(8, 0))
 
     def clear_crop_visual() -> None:
         if state["rect_id"] is not None:
@@ -587,73 +544,17 @@ def main(*, container: tk.Misc | None = None) -> None:
         else:
             end_var.set(f"종료: {_fmt_time(state['end_sec'])}")
         update_speed_hint()
-        update_loop_hint()
 
     def update_speed_hint() -> None:
         speed = normalize_speed(speed_var.get())
-        start = float(state.get("start_sec") or 0.0)
-        end = state.get("end_sec")
         dur = float(state.get("duration") or 0.0)
-        if end is None:
-            end = dur if dur > 0 else None
-        if end is None or end <= start:
-            if abs(speed - 1.0) < 1e-9:
-                speed_hint_var.set("← 자르기 할 때 적용")
-            else:
-                speed_hint_var.set("← 자르기 하면 더 길어짐")
-            return
-        clip = float(end) - start
         if abs(speed - 1.0) < 1e-9:
-            speed_hint_var.set(f"자르기 시 {_fmt_time(clip)}")
+            speed_hint_var.set("← 전체 영상에 적용 · 「느리게 저장」")
             return
-        out_dur = clip / speed
-        speed_hint_var.set(f"자르기 시 {_fmt_time(clip)} → {_fmt_time(out_dur)}")
-
-    def _loop_params_from_ui() -> tuple[int, float | None]:
-        """(횟수, 목표초|None). 모드에 따라 한쪽만 유효."""
-        raw = (loop_value_var.get() or "").strip() or "3"
-        if loop_mode_var.get() == "sec":
-            sec = _parse_sec(raw)
-            if sec is None or sec <= 0:
-                raise ValueError("초는 숫자로 입력하세요. 예: 3")
-            return 3, sec
-        try:
-            count = int(float(raw))
-        except ValueError as e:
-            raise ValueError("횟수는 정수로 입력하세요. 예: 3") from e
-        if count < 1:
-            raise ValueError("횟수는 1 이상이어야 합니다.")
-        return count, None
-
-    def update_loop_hint() -> None:
-        loop_unit_var.set("초" if loop_mode_var.get() == "sec" else "번")
-        start = float(state.get("start_sec") or 0.0)
-        end = state.get("end_sec")
-        dur = float(state.get("duration") or 0.0)
-        if end is None or float(end) <= start:
-            loop_hint_var.set("① 시작·종료 모두 지정  ② 숫자 입력  ③ 반복 저장")
-            return
-        try:
-            count, target = _loop_params_from_ui()
-            _n, loop_out, total_out = resolve_loop_plan(
-                loop_start=start,
-                loop_end=float(end),
-                total_dur=dur,
-                repeat_count=count,
-                target_loop_sec=target,
-            )
-        except ValueError as e:
-            loop_hint_var.set(str(e))
-            return
-        seg = float(end) - start
-        if target is not None:
-            loop_hint_var.set(
-                f"선택 {_fmt_time(seg)} 구간을 {_fmt_time(loop_out)}까지 반복 → 전체 {_fmt_time(total_out)}"
-            )
+        if dur > 0:
+            speed_hint_var.set(f"전체 {_fmt_time(dur)} → {_fmt_time(dur / speed)}")
         else:
-            loop_hint_var.set(
-                f"선택 {_fmt_time(seg)} 구간을 {count}번 → 전체 {_fmt_time(total_out)}"
-            )
+            speed_hint_var.set("전체 영상 처음부터 끝까지")
 
     def canvas_to_video(x: float, y: float) -> tuple[int, int]:
         scale = state["display_scale"] or 1.0
@@ -664,10 +565,7 @@ def main(*, container: tk.Misc | None = None) -> None:
         return vx, vy
 
     speed_var.trace_add("write", lambda *_a: update_speed_hint())
-    loop_mode_var.trace_add("write", lambda *_a: update_loop_hint())
-    loop_value_var.trace_add("write", lambda *_a: update_loop_hint())
     update_speed_hint()
-    update_loop_hint()
 
     def draw_crop_rect(x0: float, y0: float, x1: float, y1: float) -> None:
         if state["rect_id"] is not None:
@@ -791,7 +689,11 @@ def main(*, container: tk.Misc | None = None) -> None:
     ) -> None:
         touch_workspace_from_path(path)
         src_label = source_text or str(path)
+        prev = state.get("path")
         mp4_var.set(src_label)
+        # 다른 파일로 바꾸면 이전 저장 파일명(대소문자만 다른 이름 포함) 재사용 방지
+        if prev is None or not isinstance(prev, Path) or not paths_same_file(prev, path):
+            out_name_var.set("")
         save_gui_settings(
             mp4_path=src_label,
             output_dir=out_dir_var.get().strip(),
@@ -1159,18 +1061,15 @@ def main(*, container: tk.Misc | None = None) -> None:
             touch_workspace_from_path(path)
         out_base = _apply_output_dir_from_ui(path)
         src_for_name = path or Path(stem + ".mp4")
-        speed = normalize_speed(speed_var.get())
-        slow_suffix = speed_stem_suffix(speed)
-        default_stem = f"{stem}{slow_suffix}" if slow_suffix else stem
         dest = resolve_edit_dest(
             src_for_name,
             output_dir=out_base,
             output_name=out_name_var.get().strip() or None,
-            default_stem=default_stem,
+            default_stem=stem,
         )
         crop = state.get("crop")
         mp4_edit_log(
-            f"do_crop dest={dest} start={start} end={end} crop={crop} speed={speed} "
+            f"do_crop dest={dest} start={start} end={end} crop={crop} "
             f"yt={yt_url is not None} path={path}"
         )
         save_gui_settings(
@@ -1193,8 +1092,6 @@ def main(*, container: tk.Misc | None = None) -> None:
         set_busy(True)
         if path is None and yt_url:
             set_status("YouTube 구간 저장 중…", tag="crop")
-        elif abs(speed - 1.0) > 1e-9:
-            set_status("배속 적용·저장 중…", tag="crop")
         else:
             set_status("저장 중…", tag="crop")
 
@@ -1209,18 +1106,18 @@ def main(*, container: tk.Misc | None = None) -> None:
                         raise RuntimeError(f"파일에 접근할 수 없습니다:\n{src}\n{e}") from e
                     if not ok_file:
                         raise FileNotFoundError(f"파일을 찾을 수 없습니다:\n{src}")
-                    crop_status("ffmpeg 자르기 중…" if abs(speed - 1.0) < 1e-9 else "ffmpeg 배속·자르기 중…")
+                    crop_status("ffmpeg 자르기 중…")
                     crop_and_trim(
                         src,
                         dest,
                         start_sec=start,
                         end_sec=end,
                         crop_rect=crop,
-                        speed=speed,
+                        speed=1.0,
                     )
                 elif yt_url:
                     crop_status("YouTube 정보 조회 중…")
-                    need_reencode = crop is not None or abs(speed - 1.0) > 1e-9
+                    need_reencode = crop is not None
                     tmp = dest.with_name(dest.stem + "_dl" + dest.suffix) if need_reencode else dest
                     work_path = download_youtube_section(
                         yt_url,
@@ -1236,7 +1133,7 @@ def main(*, container: tk.Misc | None = None) -> None:
                             start_sec=0.0,
                             end_sec=None,
                             crop_rect=crop,
-                            speed=speed,
+                            speed=1.0,
                         )
                         if work_path != dest:
                             try:
@@ -1274,79 +1171,68 @@ def main(*, container: tk.Misc | None = None) -> None:
         """시작 구간부터 10초 구간 자르기."""
         do_crop(clip_len_sec=_QUICK_CLIP_SEC)
 
-    def do_loop_segment() -> None:
-        """시작~종료 구간을 반복하고 앞·뒤는 유지해 저장."""
+    def do_slow_save() -> None:
+        """느리게 설정으로 전체 영상(처음부터 끝까지) 저장."""
         raw = mp4_var.get().strip()
-        mp4_edit_log(f"do_loop_segment start: {raw[:120]!r}")
+        speed = normalize_speed(speed_var.get())
+        if abs(speed - 1.0) < 1e-9:
+            safe_messagebox(
+                root,
+                "showwarning",
+                "7_2 mp4Edit",
+                "느리게 배속을 선택하세요.\n(2배 / 3배 / 4배 느리게)",
+            )
+            return
         if not raw:
             safe_messagebox(root, "showwarning", "7_2 mp4Edit", "MP4 파일 또는 YouTube URL 을 입력하세요.")
             return
         if state.get("loading") or state.get("busy"):
-            set_status("작업 중입니다. 잠시 후 다시 시도하세요.", tag="loop")
+            set_status("작업 중입니다. 잠시 후 다시 시도하세요.", tag="slow")
             return
 
-        apply_time_entries_to_state()
-        start, end = _cut_times_from_entries()
+        # 느리게 = 전구간 (시작~끝), 구간 선택 없음
+        start = 0.0
+        end = None
         dur = float(state.get("duration") or 0.0)
-        # 종료를 비우면 영상 끝까지라서 엉뚱한(너무 긴) 구간이 반복됨 → 명시 필수
-        if end is None:
-            safe_messagebox(
-                root,
-                "showwarning",
-                "7_2 mp4Edit",
-                "반복할 구간의 종료 시각을 지정하세요.\n"
-                "(종료를 비우면 영상 끝까지라서 원하지 않는 구간이 반복됩니다.)",
-            )
-            return
-        if end <= start:
-            safe_messagebox(
-                root,
-                "showwarning",
-                "7_2 mp4Edit",
-                "먼저 타임라인에서 반복할 구간의 시작·종료를 지정하세요.",
-            )
-            return
-        mp4_edit_log(f"do_loop_segment range start={start:.3f} end={end:.3f} dur={dur:.3f}")
-
-        try:
-            count, target = _loop_params_from_ui()
-        except ValueError as e:
-            safe_messagebox(root, "showwarning", "7_2 mp4Edit", str(e))
-            return
-        try:
-            n, loop_out, total_out = resolve_loop_plan(
-                loop_start=start,
-                loop_end=float(end),
-                total_dur=dur,
-                repeat_count=count,
-                target_loop_sec=target,
-            )
-        except ValueError as e:
-            safe_messagebox(root, "showwarning", "7_2 mp4Edit", str(e))
-            return
 
         path: Path | None = None
         yt_url: str | None = None
-        loaded_path = state.get("path")
-        if isinstance(loaded_path, Path):
-            path = loaded_path
-            stem = path.stem
-            touch_workspace_from_path(path)
-        elif is_youtube_url(raw):
-            yt_url = normalize_youtube_url(raw)
-            stem = youtube_video_id(yt_url) or "output"
-        else:
-            path = Path(raw)
-            stem = path.stem
-            touch_workspace_from_path(path)
+        # 입력란의 현재 파일을 우선 (이전 로드 경로에 묶이지 않음)
+        if raw and not is_youtube_url(raw):
+            cand = Path(raw)
+            if cand.is_file():
+                path = cand
+                stem = path.stem
+                touch_workspace_from_path(path)
+                if state.get("path") != path:
+                    state["path"] = path
+                    d = probe_duration(path)
+                    if d and d > 0:
+                        dur = d
+                        state["duration"] = d
+        if path is None:
+            loaded_path = state.get("path")
+            if isinstance(loaded_path, Path) and loaded_path.is_file():
+                path = loaded_path
+                stem = path.stem
+                touch_workspace_from_path(path)
+            elif is_youtube_url(raw):
+                yt_url = normalize_youtube_url(raw)
+                stem = youtube_video_id(yt_url) or "output"
+            else:
+                path = Path(raw)
+                stem = path.stem
+                touch_workspace_from_path(path)
 
         out_base = _apply_output_dir_from_ui(path)
         src_for_name = path or Path(stem + ".mp4")
+        # 파일명은 현재 stem+배속 기준 (이전 파일의 고정 파일명 재사용 방지)
+        out_name = out_name_var.get().strip() or None
         dest = resolve_edit_dest(
             src_for_name,
             output_dir=out_base,
-            output_name=out_name_var.get().strip() or None,
-            default_stem=f"{stem}_loop{n}",
+            output_name=out_name,
+            default_stem=f"{stem}{speed_stem_suffix(speed)}",
         )
         save_gui_settings(
             mp4_path=raw,
@@ -1367,61 +1253,55 @@ def main(*, container: tk.Misc | None = None) -> None:
             return
 
         set_busy(True)
-        if target is not None:
+        if dur > 0:
             set_status(
-                f"반복 저장 중… 선택 구간 → {_fmt_time(loop_out)} (전체 {_fmt_time(total_out)})",
-                tag="loop",
+                f"느리게 저장 중… 전체 {_fmt_time(dur)} → {_fmt_time(dur / speed)}",
+                tag="slow",
             )
         else:
-            set_status(
-                f"반복 저장 중… 선택 구간 ×{n} (전체 {_fmt_time(total_out)})",
-                tag="loop",
-            )
+            set_status("느리게 저장 중… (전체)", tag="slow")
 
         def work() -> None:
             try:
                 src = path
 
-                def loop_status(msg: str) -> None:
-                    mp4_edit_log(f"loop status: {msg}")
-                    safe_after(root, lambda m=msg: set_status(m, tag="loop"))
+                def slow_status(msg: str) -> None:
+                    safe_after(root, lambda m=msg: set_status(m, tag="slow"))
 
                 if src is None and yt_url:
-                    loop_status("YouTube 전체 다운로드 중…")
-                    src = download_youtube(yt_url, dest_dir=out_base, on_status=loop_status)
+                    slow_status("YouTube 다운로드 중…")
+                    src = download_youtube(yt_url, dest_dir=out_base, on_status=slow_status)
                 if src is None:
-                    raise RuntimeError("반복할 영상 파일이 없습니다.")
+                    raise RuntimeError("저장할 영상 파일이 없습니다.")
                 try:
                     ok_file = src.is_file()
                 except OSError as e:
                     raise RuntimeError(f"파일에 접근할 수 없습니다:\n{src}\n{e}") from e
                 if not ok_file:
                     raise FileNotFoundError(f"파일을 찾을 수 없습니다:\n{src}")
-                loop_status("ffmpeg 구간 반복 중…")
-                fade = 0.15 if loop_fade_var.get() else 0.0
-                loop_segment_in_video(
+                slow_status("ffmpeg 느리게 적용 중…")
+                crop_and_trim(
                     src,
                     dest,
-                    loop_start=start,
-                    loop_end=float(end),
-                    repeat_count=count,
-                    target_loop_sec=target,
-                    crossfade_sec=fade,
+                    start_sec=start,
+                    end_sec=end,
+                    crop_rect=None,
+                    speed=speed,
                 )
 
                 def ok() -> None:
                     set_busy(False)
-                    mp4_edit_log(f"do_loop_segment ok dest={dest}")
-                    set_status(f"저장 완료: {dest.name}", tag="loop")
+                    mp4_edit_log(f"do_slow_save ok dest={dest}")
+                    set_status(f"저장 완료: {dest.name}", tag="slow")
                     safe_messagebox(root, "showinfo", "7_2 mp4Edit", f"저장했습니다.\n\n{dest}")
 
                 safe_after(root, ok)
             except Exception as e:
-                mp4_edit_log_exc("do_loop_segment worker FAIL", e)
+                mp4_edit_log_exc("do_slow_save FAIL", e)
 
                 def fail() -> None:
                     set_busy(False)
-                    set_status(str(e), tag="loop")
+                    set_status(str(e), tag="slow")
                     safe_messagebox(
                         root,
                         "showerror",
@@ -1433,246 +1313,11 @@ def main(*, container: tk.Misc | None = None) -> None:
 
         threading.Thread(target=work, daemon=True).start()
 
+
     btn_crop.configure(command=do_crop)
     btn_crop_10.configure(command=do_crop_10sec)
-    btn_loop.configure(command=do_loop_segment)
+    btn_slow.configure(command=do_slow_save)
 
-    def _require_local_video() -> Path | None:
-        raw = mp4_var.get().strip()
-        loaded = state.get("path")
-        if isinstance(loaded, Path) and loaded.is_file():
-            return loaded
-        if raw and not is_youtube_url(raw):
-            p = Path(raw)
-            if p.is_file():
-                return p
-        return None
-
-    def do_loop_auto_find() -> None:
-        """시작 시각 기준으로 종료(루프점) 자동 탐색."""
-        path = _require_local_video()
-        if path is None:
-            safe_messagebox(
-                root,
-                "showwarning",
-                "7_2 mp4Edit",
-                "자동 찾기는 로컬 MP4 가 필요합니다.\n먼저 영상을 불러오세요.",
-            )
-            return
-        if state.get("loading") or state.get("busy"):
-            set_status("작업 중입니다.", tag="loop")
-            return
-        apply_time_entries_to_state()
-        start = float(state.get("start_sec") or 0.0)
-        set_busy(True)
-        set_status("자동 루프점 찾는 중…", tag="loop")
-
-        def work() -> None:
-            try:
-                result = find_loop_points(
-                    path,
-                    loop_start=start,
-                    min_score=DEFAULT_MIN_SCORE,
-                    on_progress=lambda m: safe_after(root, lambda msg=m: set_status(msg, tag="loop")),
-                )
-
-                def done() -> None:
-                    set_busy(False)
-                    state["start_sec"] = result.loop_start
-                    state["end_sec"] = result.loop_end
-                    sync_time_entries_from_state()
-                    update_time_labels()
-                    redraw_timeline()
-                    set_status(result.message, tag="loop")
-                    if result.ok:
-                        safe_messagebox(root, "showinfo", "7_2 mp4Edit", result.message)
-                    else:
-                        safe_messagebox(
-                            root,
-                            "showwarning",
-                            "7_2 mp4Edit",
-                            result.message + "\n\n후보 구간은 입력란에 넣어 두었습니다.",
-                        )
-
-                safe_after(root, done)
-            except Exception as e:
-                mp4_edit_log_exc("do_loop_auto_find FAIL", e)
-
-                def fail() -> None:
-                    set_busy(False)
-                    set_status(str(e), tag="loop")
-                    safe_messagebox(root, "showerror", "7_2 mp4Edit", str(e))
-
-                safe_after(root, fail)
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def do_loop_preview() -> None:
-        """선택 구간을 2번 반복한 미리보기 파일을 열어 확인."""
-        path = _require_local_video()
-        if path is None:
-            safe_messagebox(
-                root,
-                "showwarning",
-                "7_2 mp4Edit",
-                "미리보기는 로컬 MP4 가 필요합니다.",
-            )
-            return
-        if state.get("loading") or state.get("busy"):
-            return
-        apply_time_entries_to_state()
-        start, end = _cut_times_from_entries()
-        if end is None or end <= start:
-            safe_messagebox(
-                root,
-                "showwarning",
-                "7_2 mp4Edit",
-                "미리볼 시작·종료를 지정하세요.\n(자동 찾기를 먼저 실행해도 됩니다.)",
-            )
-            return
-        set_busy(True)
-        set_status("미리보기 만드는 중…", tag="loop")
-        fade = 0.15 if loop_fade_var.get() else 0.0
-        preview_path = Path(tempfile.gettempdir()) / f"mp4_edit_loop_preview_{os.getpid()}.mp4"
-
-        def work() -> None:
-            try:
-                loop_segment_in_video(
-                    path,
-                    preview_path,
-                    loop_start=start,
-                    loop_end=float(end),
-                    repeat_count=2,
-                    crossfade_sec=fade,
-                )
-
-                def ok() -> None:
-                    set_busy(False)
-                    set_status(f"미리보기: {preview_path.name}", tag="loop")
-                    try:
-                        os.startfile(str(preview_path))  # type: ignore[attr-defined]
-                    except OSError as e:
-                        safe_messagebox(root, "showerror", "7_2 mp4Edit", f"미리보기 열기 실패:\n{e}")
-
-                safe_after(root, ok)
-            except Exception as e:
-                mp4_edit_log_exc("do_loop_preview FAIL", e)
-
-                def fail() -> None:
-                    set_busy(False)
-                    set_status(str(e), tag="loop")
-                    safe_messagebox(root, "showerror", "7_2 mp4Edit", str(e))
-
-                safe_after(root, fail)
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def do_loop_batch() -> None:
-        """폴더 안 MP4 일괄: 자동 루프점 → 반복 저장. 실패는 목록으로 남김."""
-        if state.get("loading") or state.get("busy"):
-            return
-        init = Path(out_dir_var.get().strip()) if out_dir_var.get().strip() else default_output_dir()
-        folder = filedialog.askdirectory(
-            title="일괄 처리할 MP4 폴더",
-            initialdir=folder_dialog_initial(init),
-        )
-        if not folder:
-            return
-        files = list_mp4_files(Path(folder))
-        if not files:
-            safe_messagebox(root, "showwarning", "7_2 mp4Edit", "폴더에 MP4 가 없습니다.")
-            return
-        try:
-            count, target = _loop_params_from_ui()
-        except ValueError as e:
-            safe_messagebox(root, "showwarning", "7_2 mp4Edit", str(e))
-            return
-        out_base = _apply_output_dir_from_ui(None)
-        out_base.mkdir(parents=True, exist_ok=True)
-        fade = 0.15 if loop_fade_var.get() else 0.0
-        if not messagebox.askyesno(
-            "7_2 mp4Edit",
-            f"{len(files)}개 MP4 를 일괄 처리합니다.\n"
-            f"저장 폴더: {out_base}\n"
-            f"유사도 {DEFAULT_MIN_SCORE:.0%} 미만은 건너뛰고 목록에 남깁니다.\n계속할까요?",
-        ):
-            return
-        set_busy(True)
-
-        def work() -> None:
-            ok_n = 0
-            skip: list[str] = []
-            try:
-                for i, src in enumerate(files, 1):
-                    safe_after(
-                        root,
-                        lambda i=i, name=src.name: set_status(
-                            f"일괄 {i}/{len(files)}: {name}", tag="loop"
-                        ),
-                    )
-                    try:
-                        found = find_loop_points(src, loop_start=0.0, min_score=DEFAULT_MIN_SCORE)
-                        if not found.ok:
-                            skip.append(f"{src.name} — {found.message}")
-                            continue
-                        dest = resolve_edit_dest(
-                            src,
-                            output_dir=out_base,
-                            default_stem=f"{src.stem}_loop",
-                        )
-                        loop_segment_in_video(
-                            src,
-                            dest,
-                            loop_start=found.loop_start,
-                            loop_end=found.loop_end,
-                            repeat_count=count,
-                            target_loop_sec=target,
-                            crossfade_sec=fade,
-                        )
-                        ok_n += 1
-                    except Exception as e:
-                        skip.append(f"{src.name} — {e}")
-                        mp4_edit_log_exc(f"batch fail {src}", e)
-
-                def done() -> None:
-                    set_busy(False)
-                    msg = f"일괄 완료: 성공 {ok_n} / 전체 {len(files)}"
-                    set_status(msg, tag="loop")
-                    if skip:
-                        detail = "\n".join(skip[:30])
-                        if len(skip) > 30:
-                            detail += f"\n… 외 {len(skip) - 30}건"
-                        # 실패 목록 파일
-                        fail_path = out_base / "_loop_batch_manual.txt"
-                        fail_path.write_text(
-                            "수동 시작·종료가 필요한 파일\n\n" + "\n".join(skip) + "\n",
-                            encoding="utf-8",
-                        )
-                        safe_messagebox(
-                            root,
-                            "showwarning",
-                            "7_2 mp4Edit",
-                            f"{msg}\n\n수동 필요 {len(skip)}건 →\n{fail_path}\n\n{detail}",
-                        )
-                    else:
-                        safe_messagebox(root, "showinfo", "7_2 mp4Edit", msg)
-
-                safe_after(root, done)
-            except Exception as e:
-                mp4_edit_log_exc("do_loop_batch FAIL", e)
-
-                def fail() -> None:
-                    set_busy(False)
-                    set_status(str(e), tag="loop")
-                    safe_messagebox(root, "showerror", "7_2 mp4Edit", str(e))
-
-                safe_after(root, fail)
-
-        threading.Thread(target=work, daemon=True).start()
-
-    btn_loop_auto.configure(command=do_loop_auto_find)
-    btn_loop_preview.configure(command=do_loop_preview)
-    btn_loop_batch.configure(command=do_loop_batch)
 
     def on_close() -> None:
         save_gui_settings(

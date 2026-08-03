@@ -4,6 +4,7 @@
 지원 형식:
 - 한 줄: ``1-1 원본: ... TTS: ...`` / ``1-1 原稿: ... TTS: ...`` / ``1-1 Original: ... TTS: ...``
 - 여러 줄(v2.0): ``1-1`` 다음 ``Original:`` / ``TTS:`` / ``STT_Reference:`` (STT_Reference는 무시)
+- 간단: ``1.{}`` 파트 헤더 + ``1-1{텍스트}`` / ``1-1 텍스트`` → 앞자리별 part01.mp3 …
 """
 
 from __future__ import annotations
@@ -11,13 +12,18 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-PART_HEADER = re.compile(r"^\s*\d+\.\{\}\s*$")
+# 파트 헤더: 1.{} 또는 1.{제목}
+PART_HEADER = re.compile(r"^\s*\d+\.\{[^}]*\}\s*$")
 SUMMARY = re.compile(r"^\s*\*\*요약")
 # 한국어·일본어 문장 종결 부호
 _SENTENCE_END = frozenset(".!?…。！？")
 # 원본 라벨: 한국어(원본) · 일본어(原稿) · 영어(Original)
 _ORIGINAL_LABEL = r"(?:원본|原稿|Original)"
 _CAPTION_ID_ONLY = re.compile(r"^\s*(\d+-\d+)\s*$")
+# 1-1{TTS 본문} 또는 1-1 {TTS 본문}
+_CAPTION_BRACE_RE = re.compile(r"^\s*(\d+-\d+)\s*\{(.*)\}\s*$")
+# 1-1 본문 (원본/TTS 라벨 없는 간단 형식)
+_CAPTION_PLAIN_RE = re.compile(r"^\s*(\d+-\d+)\s+(.+)$")
 _CAPTION_LINE_RE = re.compile(
     rf"^\s*(\d+-\d+)\s+{_ORIGINAL_LABEL}:\s*(.+)$",
     re.IGNORECASE,
@@ -76,11 +82,33 @@ def parse_knowledgetts_block(text: str) -> list[CaptionLine]:
                 out.append(parsed)
             continue
 
+        # 1-1{텍스트} — 앞자리 숫자별 partNN.mp3 일괄 생성용
+        brace_m = _CAPTION_BRACE_RE.match(line)
+        if brace_m:
+            pending_id = pending_orig = None
+            body = (brace_m.group(2) or "").strip()
+            if body:
+                out.append(CaptionLine(brace_m.group(1), body, body))
+            continue
+
         id_m = _CAPTION_ID_ONLY.match(line)
         if id_m:
             pending_id = id_m.group(1)
             pending_orig = None
             continue
+
+        # 1-1 일반 텍스트 (라벨 없음) — TTS 본문으로 사용
+        plain_m = _CAPTION_PLAIN_RE.match(line)
+        if plain_m:
+            rest = plain_m.group(2).strip()
+            # 원본:/TTS: 멀티라인 처리는 아래로 넘김
+            if not re.match(rf"^{_ORIGINAL_LABEL}:", rest, re.IGNORECASE) and not re.match(
+                r"^TTS:", rest, re.IGNORECASE
+            ):
+                pending_id = pending_orig = None
+                if rest:
+                    out.append(CaptionLine(plain_m.group(1), rest, rest))
+                continue
 
         if _STT_REF_LINE.match(line):
             continue

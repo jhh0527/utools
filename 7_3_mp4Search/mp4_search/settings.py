@@ -110,7 +110,14 @@ def load_gui_settings() -> dict[str, str]:
     if not isinstance(data, dict):
         return {}
     out: dict[str, str] = {}
-    for key in ("srt_file", "mp4_dir", "download_dir", "mp3_file", "preview_pane_width"):
+    for key in (
+        "srt_file",
+        "mp4_dir",
+        "download_dir",
+        "mp3_file",
+        "preview_pane_width",
+        "announcer_file",
+    ):
         v = data.get(key)
         if isinstance(v, str) and v.strip():
             out[key] = v.strip()
@@ -125,6 +132,10 @@ def load_gui_settings() -> dict[str, str]:
         out["burn_subtitles"] = "1" if bool(data.get("burn_subtitles")) else "0"
     else:
         out["burn_subtitles"] = "1"
+    if "add_announcer" in data:
+        out["add_announcer"] = "1" if bool(data.get("add_announcer")) else "0"
+    else:
+        out["add_announcer"] = "1"
     return out
 
 
@@ -137,6 +148,8 @@ def save_gui_settings(
     preview_pane_width: str = "",
     play_loop: bool | None = None,
     burn_subtitles: bool | None = None,
+    add_announcer: bool | None = None,
+    announcer_file: str | None = None,
 ) -> None:
     p = config_path()
     data: dict = {}
@@ -161,5 +174,9 @@ def save_gui_settings(
         data["play_loop"] = bool(play_loop)
     if burn_subtitles is not None:
         data["burn_subtitles"] = bool(burn_subtitles)
+    if add_announcer is not None:
+        data["add_announcer"] = bool(add_announcer)
+    if announcer_file is not None:
+        data["announcer_file"] = str(announcer_file).strip()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
