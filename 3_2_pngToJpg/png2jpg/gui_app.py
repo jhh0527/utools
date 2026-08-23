@@ -20,7 +20,8 @@ from png2jpg.converter import (
     DEFAULT_JPEG_QUALITY,
     iter_source_images,
 )
-from png2jpg.paths import default_input_dir, default_output_dir
+from png2jpg.mp4_copy import copy_jpgs_to_mp4
+from png2jpg.paths import default_input_dir, default_output_dir, resolve_mp4_dir
 from png2jpg.settings import load_gui_settings, save_gui_settings
 from wisdom_workspace import folder_dialog_initial, touch_workspace_from_path
 
@@ -130,14 +131,16 @@ def main(
             p = filedialog.askdirectory(title=label, initialdir=init_dir)
             if p:
                 touch_workspace_from_path(p)
+                var.set(p)
                 if on_pick:
                     on_pick()
                 else:
-                    var.set(p)
+                    refresh_target_count()
 
         btn = ttk.Button(rf, text="폴더 선택…", command=pick)
         btn.grid(row=0, column=1)
         browse_widgets.extend([ent, btn])
+
         def _on_dir_drop(_p: str) -> None:
             if on_pick:
                 on_pick()
@@ -159,24 +162,14 @@ def main(
         sub = "하위 포함" if recursive_var.get() else "현재 폴더만"
         target_count_var.set(f"PNG/JPG {n}개 ({sub})")
 
-    def on_input_changed() -> None:
+    def on_input_folder_set() -> None:
+        """선택한 변환 대상이 …/png 이면 저장 폴더를 …/jpg 로 맞춘다."""
+        inp = Path(in_var.get().strip())
+        if inp.is_dir() and inp.name.lower() == "png":
+            out_var.set(str(inp.parent / "jpg"))
         refresh_target_count()
 
-    def sync_paths_from_content_root() -> None:
-        try:
-            from wisdom_content_paths import default_jpg_dir, default_png_dir
-
-            png = default_png_dir()
-            jpg = default_jpg_dir()
-            if png is not None:
-                in_var.set(str(png))
-            if jpg is not None:
-                out_var.set(str(jpg))
-        except ImportError:
-            pass
-        refresh_target_count()
-
-    row_dir("변환 대상 폴더 (PNG·JPG)", in_var, 0, on_pick=sync_paths_from_content_root)
+    row_dir("변환 대상 폴더 (PNG·JPG)", in_var, 0, on_pick=on_input_folder_set)
     row_dir("저장 폴더 (SRT_XXX.jpg)", out_var, 2)
 
     ttk.Label(
@@ -230,10 +223,12 @@ def main(
         log.configure(state=tk.DISABLED)
 
     btn_run: ttk.Button
+    btn_mp4: ttk.Button
 
     def set_busy(on: bool) -> None:
         state = tk.DISABLED if on else tk.NORMAL
         btn_run.configure(state=state)
+        btn_mp4.configure(state=state)
         for w in browse_widgets:
             try:
                 w.configure(state=state)
@@ -342,10 +337,60 @@ def main(
         status_var.set(f"변환 시작… 대상 {n_pre}개 파일")
         threading.Thread(target=work, daemon=True).start()
 
+    def run_copy_to_mp4() -> None:
+        jpg = Path(out_var.get().strip())
+        if not jpg.is_dir():
+            messagebox.showerror("mp4 복사", f"저장 폴더(JPG)가 없습니다:\n{jpg}")
+            return
+        mp4 = resolve_mp4_dir(jpg)
+        if not messagebox.askyesno(
+            "mp4 복사",
+            f"mp4 폴더의 기존 JPG를 모두 삭제한 뒤\n"
+            f"저장 폴더 JPG를 복사합니다.\n\n"
+            f"원본: {jpg.resolve()}\n"
+            f"대상: {mp4.resolve()}\n\n"
+            f"계속할까요?",
+        ):
+            return
+        persist_dirs()
+        set_busy(True)
+        status_var.set("mp4 복사 중…")
+
+        def work() -> None:
+            err: Exception | None = None
+            dest: Path | None = None
+            deleted = copied = 0
+            try:
+                dest, deleted, copied = copy_jpgs_to_mp4(jpg, mp4_dir=mp4)
+            except Exception as e:
+                err = e
+                traceback.print_exc()
+
+            def done() -> None:
+                set_busy(False)
+                if err:
+                    messagebox.showerror("mp4 복사", str(err))
+                    status_var.set("mp4 복사 오류")
+                    return
+                assert dest is not None
+                log_line(f"mp4 기존 JPG 삭제: {deleted}개")
+                log_line(f"mp4 복사: {copied}개 → {dest}")
+                status_var.set(f"mp4 복사 완료: {copied}개 → {dest}")
+                messagebox.showinfo(
+                    "mp4 복사 완료",
+                    f"삭제: {deleted}개\n복사: {copied}개\n→ {dest}",
+                )
+
+            root.after(0, done)
+
+        threading.Thread(target=work, daemon=True).start()
+
     row_btns = ttk.Frame(frm)
     row_btns.grid(row=10, column=0, sticky="ew", pady=(8, 0))
     btn_run = ttk.Button(row_btns, text="PNG → SRT_XXX.jpg 변환", command=run_convert)
     btn_run.pack(side=tk.LEFT)
+    btn_mp4 = ttk.Button(row_btns, text="mp4 복사", command=run_copy_to_mp4)
+    btn_mp4.pack(side=tk.LEFT, padx=(8, 0))
 
     def on_close() -> None:
         persist_dirs()

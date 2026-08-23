@@ -1,0 +1,307 @@
+# -*- coding: utf-8 -*-
+"""씬 스크립트 파싱 — ``SRT_XXX: prompt``."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+_SCENE_RE = re.compile(
+    r"^\s*SRT[_\s-]?(\d{1,6})\s*:\s*(.+?)\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_SCENE_START_RE = re.compile(r"^\s*SRT[_\s-]?(\d{1,6})\s*:\s*", re.IGNORECASE)
+_SRT_TS = re.compile(r"^(\d{2}):(\d{2}):(\d{2})[,.](\d{1,3})$")
+_SRT_ARROW = re.compile(
+    r"(\d{2}:\d{2}:\d{2}[,.]\d{1,3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{1,3})"
+)
+
+
+@dataclass(frozen=True)
+class SceneLine:
+    sec: int
+    prompt: str
+
+    @property
+    def label(self) -> str:
+        return f"SRT_{self.sec:03d}"
+
+    @property
+    def png_name(self) -> str:
+        return f"SRT_{self.sec:03d}.png"
+
+    def list_label(self) -> str:
+        tip = self.prompt[:72] + ("…" if len(self.prompt) > 72 else "")
+        return f"{self.label}  |  {tip}"
+
+
+def srt_png_name(sec: int) -> str:
+    return f"SRT_{max(0, int(sec)):03d}.png"
+
+
+def scene_png_path(png_dir: Path, sec: int) -> Path:
+    return Path(png_dir) / srt_png_name(sec)
+
+
+def _srt_timestamp_to_sec(ts: str) -> int | None:
+    m = _SRT_TS.match((ts or "").strip())
+    if not m:
+        return None
+    h, mi, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    return (h * 60 + mi) * 60 + s
+
+
+def last_srt_end_sec(srt_path: str | Path | None) -> int | None:
+    """대본(all.srt) 마지막 큐 종료초(반올림)."""
+    if not srt_path:
+        return None
+    p = Path(srt_path)
+    if not p.is_file():
+        return None
+    try:
+        raw = p.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return None
+    last: int | None = None
+    for m in _SRT_ARROW.finditer(raw):
+        sec = _srt_timestamp_to_sec(m.group(2))
+        if sec is None:
+            continue
+        if last is None or sec > last:
+            last = sec
+    return last
+
+
+def append_tail_scene_if_needed(
+    scenes: list[SceneLine],
+    *,
+    srt_path: str | Path | None,
+    interval_sec: int = 20,
+) -> list[SceneLine]:
+    """마지막 씬이 종료초까지 ``interval_sec`` 이내면 ``SRT_YYY``(마지막초) 추가."""
+    if not scenes:
+        return list(scenes)
+    end = last_srt_end_sec(srt_path)
+    if end is None:
+        return list(scenes)
+    last_sec = max(sc.sec for sc in scenes)
+    gap = end - last_sec
+    if gap <= 0 or gap > max(1, int(interval_sec)):
+        return list(scenes)
+    if any(sc.sec == end for sc in scenes):
+        return list(scenes)
+    out = list(scenes)
+    out.append(
+        SceneLine(
+            sec=int(end),
+            prompt=f"last-second image at {end}s (SRT end)",
+        )
+    )
+    return out
+
+
+def build_interval_scenes(
+    scenes: list[SceneLine],
+    *,
+    srt_path: str | Path | None,
+    interval_sec: int = 20,
+) -> list[SceneLine]:
+    """생성 간격으로 ``0 … 마지막초`` 씬 목록. 프롬프트에 있으면 본문 유지.
+
+    SRT가 있으면 **간격 격자(+종료초)** 만 사용한다.
+    가이드 문서의 예시 ``SRT_026:`` 처럼 격자 밖 초는 넣지 않는다.
+    """
+    gap = max(1, int(interval_sec))
+    by_sec = {sc.sec: sc for sc in scenes}
+    end = last_srt_end_sec(srt_path)
+    if end is None:
+        # SRT 없으면 프롬프트에 적힌 씬만
+        if scenes:
+            return sorted(scenes, key=lambda s: s.sec)
+        return []
+    secs: list[int] = list(range(0, end + 1, gap))
+    if not secs or secs[-1] != end:
+        secs.append(int(end))
+    secs = sorted(set(secs))
+    out: list[SceneLine] = []
+    for sec in secs:
+        if sec in by_sec:
+            out.append(by_sec[sec])
+        else:
+            out.append(SceneLine(sec=int(sec), prompt=f"image at {sec}s"))
+    return out
+
+
+def png_already_exists(png_dir: Path, sec: int, *, min_bytes: int = 512) -> bool:
+    """PNG 폴더에 유효한 SRT_XXX.png가 있으면 재생성하지 않음."""
+    p = scene_png_path(png_dir, sec)
+    try:
+        return p.is_file() and p.stat().st_size >= int(min_bytes)
+    except OSError:
+        return False
+
+
+@dataclass(frozen=True)
+class SrtCue:
+    start: float
+    end: float
+    text: str
+
+
+_PLACEHOLDER_PROMPT_RE = re.compile(
+    r"^(?:image at \d+s|last-second image at \d+s(?:\s*\(SRT end\))?)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _srt_timestamp_to_float(ts: str) -> float | None:
+    m = _SRT_TS.match((ts or "").strip())
+    if not m:
+        return None
+    h, mi, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    ms = int((m.group(4) or "0").ljust(3, "0")[:3])
+    return float((h * 60 + mi) * 60 + s) + ms / 1000.0
+
+
+def parse_srt_cues(srt_path: str | Path | None) -> list[SrtCue]:
+    """SRT 큐 (시작·종료·대사) 목록."""
+    if not srt_path:
+        return []
+    p = Path(srt_path)
+    if not p.is_file():
+        return []
+    try:
+        raw = p.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return []
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+    cues: list[SrtCue] = []
+    for block in re.split(r"\n\s*\n", raw.strip()):
+        lines = [ln.strip() for ln in block.split("\n") if ln.strip()]
+        if len(lines) < 2:
+            continue
+        arrow: str | None = None
+        text_lines: list[str] = []
+        for ln in lines:
+            if arrow is None and "-->" in ln:
+                arrow = ln
+                continue
+            if arrow is not None and not ln.isdigit():
+                text_lines.append(ln)
+        if not arrow:
+            continue
+        m = _SRT_ARROW.search(arrow)
+        if not m:
+            continue
+        start = _srt_timestamp_to_float(m.group(1))
+        end = _srt_timestamp_to_float(m.group(2))
+        if start is None or end is None:
+            continue
+        text = " ".join(text_lines).strip()
+        if text:
+            cues.append(SrtCue(start=float(start), end=float(end), text=text))
+    return cues
+
+
+def srt_dialogue_for_window(
+    srt_path: str | Path | None,
+    sec: int,
+    interval_sec: int = 20,
+) -> str:
+    """영상 초 T 구간의 대본 — ``[T, T+interval)`` 에 겹치는 큐.
+
+    종료초 단독 씬처럼 창이 비면 직전 ``interval`` 구간으로 한 번 더 찾는다.
+    """
+    cues = parse_srt_cues(srt_path)
+    if not cues:
+        return ""
+    gap = max(1, int(interval_sec))
+    t0 = float(max(0, int(sec)))
+    t1 = t0 + float(gap)
+
+    def _collect(a: float, b: float) -> list[str]:
+        return [c.text for c in cues if c.end > a and c.start < b]
+
+    parts = _collect(t0, t1)
+    if not parts:
+        parts = _collect(max(0.0, t0 - float(gap)), t0)
+    # 큐 단위 중복 제거(경계 겹침 유지하되 동일 문장 반복만 제거)
+    out: list[str] = []
+    seen: set[str] = set()
+    for t in parts:
+        key = re.sub(r"\s+", " ", t).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(t.strip())
+    return "\n".join(out).strip()
+
+
+def is_real_scene_prompt(prompt: str | None) -> bool:
+    """격자 placeholder·가이드 예시/템플릿이 아닌 실장면 프롬프트인지."""
+    p = (prompt or "").strip()
+    if len(p) < 40:
+        return False
+    if _PLACEHOLDER_PROMPT_RE.match(p):
+        return False
+    if p.startswith("…") or p.startswith("..."):
+        return False
+    if "[§0" in p or "§0 LOOK" in p or "§0-X" in p:
+        return False
+    if "BEGIN_NOVEL" in p or "작성 지침" in p or "NOVEL PACK" in p:
+        return False
+    return True
+
+
+def parse_scene_script(text: str) -> list[SceneLine]:
+    """textarea 본문에서 ``SRT_XXX: …`` 씬을 추출.
+
+    한 줄에 프롬프트가 길거나, 빈 줄로 구분된 블록도 허용.
+    """
+    raw = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not raw.strip():
+        return []
+
+    scenes: list[SceneLine] = []
+    cur_sec: int | None = None
+    cur_parts: list[str] = []
+
+    def flush() -> None:
+        nonlocal cur_sec, cur_parts
+        if cur_sec is None:
+            return
+        prompt = " ".join(p.strip() for p in cur_parts if p.strip()).strip()
+        prompt = re.sub(r"\s+", " ", prompt)
+        if prompt:
+            scenes.append(SceneLine(sec=int(cur_sec), prompt=prompt))
+        cur_sec = None
+        cur_parts = []
+
+    for line in raw.split("\n"):
+        m = _SCENE_START_RE.match(line)
+        if m:
+            flush()
+            cur_sec = int(m.group(1))
+            rest = line[m.end() :].strip()
+            cur_parts = [rest] if rest else []
+            continue
+        if cur_sec is not None:
+            if line.strip():
+                cur_parts.append(line.strip())
+            else:
+                # 빈 줄 — 다음 SRT_ 전까지 이어붙이거나 종료
+                continue
+    flush()
+
+    # 한 줄 정규식 보조 (위에서 못 잡은 경우 거의 없음)
+    if not scenes:
+        for m in re.finditer(
+            r"SRT[_\s-]?(\d{1,6})\s*:\s*(.+?)(?=(?:\n\s*SRT[_\s-]?\d)|\Z)",
+            raw,
+            re.IGNORECASE | re.DOTALL,
+        ):
+            prompt = re.sub(r"\s+", " ", m.group(2).strip())
+            if prompt:
+                scenes.append(SceneLine(sec=int(m.group(1)), prompt=prompt))
+    return scenes

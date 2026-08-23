@@ -139,18 +139,47 @@ def _video_only_encode_args(
 
 
 def _compatible_mp4_encode_args() -> list[str]:
+    """영상+음성 재인코딩 — 음성은 48kHz 스테레오·고품질 리샘플·loudnorm."""
     return [
         *_video_only_encode_args(),
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
+        "-af",
+        _merge_audio_af(),
+        *_merge_audio_encode_args(),
     ]
 
 
 _COMPOSE_FPS = 30
+_MERGE_AUDIO_RATE = 48000
+_MERGE_AUDIO_CHANNELS = 2
+_MERGE_AUDIO_BITRATE = "192k"
 _COMPOSE_TILE_MIN_SEC = 45.0
 _COMPOSE_TILE_MIN_SAVING_RATIO = 0.12
+
+
+def _merge_audio_af() -> str:
+    """병합용 오디오 필터: 고품질 리샘플 → 스테레오 → loudnorm.
+
+    모노·44.1kHz 등 이종 음성을 48kHz 스테레오로 맞추고 음량을 고르게 한다.
+    """
+    # osr/ochl 명시 + async 로 타임스탬프 드리프트·클릭 완화
+    return (
+        f"aresample=osr={_MERGE_AUDIO_RATE}:ochl=stereo:async=1:first_pts=0,"
+        f"aformat=sample_rates={_MERGE_AUDIO_RATE}:channel_layouts=stereo,"
+        "loudnorm=I=-16:TP=-1.5:LRA=11"
+    )
+
+
+def _merge_audio_encode_args() -> list[str]:
+    return [
+        "-c:a",
+        "aac",
+        "-b:a",
+        _MERGE_AUDIO_BITRATE,
+        "-ar",
+        str(_MERGE_AUDIO_RATE),
+        "-ac",
+        str(_MERGE_AUDIO_CHANNELS),
+    ]
 
 
 def _even_dim(n: int) -> int:
@@ -600,6 +629,181 @@ def _probe_media_duration(path: Path) -> float | None:
     return _probe_video_duration(path)  # format=duration works for audio too
 
 
+def _is_playable_mp4(path: Path) -> bool:
+    """재생 가능 여부 — ffmpeg 중 kill 시 moov 없는 조각 파일을 걸러낸다."""
+    try:
+        if not path.is_file() or path.stat().st_size < 1024:
+            return False
+    except OSError:
+        return False
+    return (_probe_media_duration(path) or 0.0) > 0.05
+
+
+def _promote_if_playable(src: Path, dest: Path) -> Path | None:
+    """완성된 MP4만 ``dest`` 로 올린다. 불완전하면 src 삭제 후 None."""
+    src = Path(src)
+    dest = Path(dest)
+    if not _is_playable_mp4(src):
+        src.unlink(missing_ok=True)
+        return None
+    if src.resolve() == dest.resolve():
+        return dest
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.is_file():
+        dest.unlink()
+    src.replace(dest)
+    return dest
+
+
+def _probe_video_params(path: Path) -> tuple[int, int, str] | None:
+    """(width, height, avg_frame_rate) — concat copy 가능 여부 판단용."""
+    fp = _ffprobe_bin()
+    if not fp:
+        return None
+    cmd = [
+        str(fp),
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height,avg_frame_rate,r_frame_rate",
+        "-of",
+        "json",
+        str(path),
+    ]
+    try:
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            **_win_subprocess_flags(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0 or not (r.stdout or "").strip():
+        return None
+    try:
+        import json
+
+        data = json.loads(r.stdout)
+        streams = data.get("streams") or []
+        if not streams:
+            return None
+        s = streams[0]
+        w = int(s.get("width") or 0)
+        h = int(s.get("height") or 0)
+        rate = str(s.get("avg_frame_rate") or s.get("r_frame_rate") or "").strip()
+        if w <= 0 or h <= 0:
+            return None
+        return (w, h, rate or "0/0")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _clips_stream_copy_compatible(clips: list[Path], *, video_only: bool = False) -> bool:
+    """해상도·fps·(음성) 규격이 같아야 concat ``-c copy`` 가능."""
+    if len(clips) <= 1:
+        return True
+    base = _probe_video_params(clips[0])
+    if base is None:
+        return False
+    bw, bh, br = base
+    for c in clips[1:]:
+        p = _probe_video_params(c)
+        if p is None:
+            return False
+        w, h, rate = p
+        if (w, h) != (bw, bh) or rate != br:
+            return False
+    if video_only:
+        return True
+    return _clips_audio_copy_compatible(clips)
+
+
+def _probe_audio_params(path: Path) -> tuple[int, int, str] | None:
+    """(sample_rate, channels, codec_name) — 없으면 None (무음 클립)."""
+    fp = _ffprobe_bin()
+    if not fp:
+        return None
+    cmd = [
+        str(fp),
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=sample_rate,channels,codec_name",
+        "-of",
+        "json",
+        str(path),
+    ]
+    try:
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            **_win_subprocess_flags(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0 or not (r.stdout or "").strip():
+        return None
+    try:
+        import json
+
+        data = json.loads(r.stdout)
+        streams = data.get("streams") or []
+        if not streams:
+            return None
+        s = streams[0]
+        rate = int(s.get("sample_rate") or 0)
+        ch = int(s.get("channels") or 0)
+        codec = str(s.get("codec_name") or "").strip().lower()
+        if rate <= 0 or ch <= 0:
+            return None
+        return (rate, ch, codec or "unknown")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _clips_video_copy_compatible(clips: list[Path]) -> bool:
+    """영상 해상도·fps 만 동일하면 True (음성은 무시)."""
+    if len(clips) <= 1:
+        return True
+    base = _probe_video_params(clips[0])
+    if base is None:
+        return False
+    bw, bh, br = base
+    for c in clips[1:]:
+        p = _probe_video_params(c)
+        if p is None:
+            return False
+        w, h, rate = p
+        if (w, h) != (bw, bh) or rate != br:
+            return False
+    return True
+
+
+def _clips_audio_copy_compatible(clips: list[Path]) -> bool:
+    """샘플레이트·채널·코덱이 모두 같거나, 전부 무음이면 copy 가능."""
+    params: list[tuple[int, int, str] | None] = [_probe_audio_params(c) for c in clips]
+    present = [p for p in params if p is not None]
+    if not present:
+        return True
+    if len(present) != len(params):
+        # 일부만 오디오 있음 → copy 불가
+        return False
+    base = present[0]
+    return all(p == base for p in present[1:])
+
+
 def _probe_has_audio_stream(path: Path) -> bool:
     fp = _ffprobe_bin()
     if not fp:
@@ -990,6 +1194,28 @@ def _flatten_ffmpeg_cmd(cmd: list) -> list[str]:
     return flat
 
 
+def _force_ffmpeg_progress_stderr(cmd: list[str]) -> list[str]:
+    """진행 출력을 stderr(pipe:2)로 고정 — Windows 에서 stdout 파이프 버퍼링으로 % 가 안 뜨는 문제 방지."""
+    out = list(cmd)
+    if "-progress" in out:
+        i = out.index("-progress")
+        if i + 1 < len(out):
+            out[i + 1] = "pipe:2"
+        else:
+            out.extend(["pipe:2"])
+    else:
+        # ffmpeg 실행 파일 바로 뒤에 삽입
+        out[1:1] = ["-progress", "pipe:2", "-nostats"]
+    if "-nostats" not in out:
+        # -progress 다음에 두면 로그 노이즈가 줄어 줄 단위 파싱이 안정적
+        try:
+            pi = out.index("-progress")
+            out.insert(pi + 2, "-nostats")
+        except ValueError:
+            out[1:1] = ["-nostats"]
+    return out
+
+
 def _run_ffmpeg_compose(
     cmd: list[str],
     *,
@@ -997,46 +1223,83 @@ def _run_ffmpeg_compose(
     duration_sec: float | None = None,
     on_progress: Callable[[float], None] | None = None,
     cwd: str | Path | None = None,
+    apply_duration_limit: bool = True,
 ) -> tuple[bool, str]:
-    """ffmpeg 실행. (취소 여부, stderr 텍스트)."""
-    cmd = _flatten_ffmpeg_cmd(cmd)
-    if duration_sec and duration_sec > 0:
+    """ffmpeg 실행. (취소 여부, stderr 텍스트).
+
+    ``duration_sec``: 진행률·타임아웃 기준.
+    ``apply_duration_limit``: True 이면 출력에 ``-t`` (구간 자르기).
+    concat 등 전체 길이를 유지할 때는 False 로 두고 진행률만 계산.
+    """
+    cmd = _force_ffmpeg_progress_stderr(_flatten_ffmpeg_cmd(cmd))
+    if apply_duration_limit and duration_sec and duration_sec > 0:
         out_path = cmd[-1]
         cmd = cmd[:-1] + ["-t", f"{duration_sec:.3f}", out_path]
     popen_kw = _win_subprocess_flags()
     if cwd is not None:
         popen_kw["cwd"] = str(cwd)
+    # progress → stderr, stdout 버림. 바이너리·비버퍼로 읽어 Windows 파이프 지연을 피한다.
     proc = subprocess.Popen(
         cmd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        bufsize=0,
         **popen_kw,
     )
     _set_active_ffmpeg_proc(proc)
     watcher = _start_cancel_watcher(cancel_event, proc)
     cancelled = False
     err_lines: list[str] = []
-    out_ms_re = re.compile(r"out_time_ms=(\d+)")
+    # ffmpeg: out_time_ms 는 이름과 달리 마이크로초(us) 인 경우가 많음. out_time_us 도 동일.
+    out_us_re = re.compile(r"out_time_(?:us|ms)=(\d+)")
+    out_hms_re = re.compile(r"out_time=(\d+):(\d+):(\d+(?:\.\d+)?)")
     dur_us = int(max(0.1, float(duration_sec or 0)) * 1_000_000) if duration_sec else 0
     wait_timeout = max(120.0, float(duration_sec or 30) * 4.0)
     run_deadline = time.monotonic() + max(600.0, float(duration_sec or 60) * 15.0)
+    last_pct_report = -1.0
+
+    def _emit_pct(pct: float) -> None:
+        nonlocal last_pct_report
+        if not on_progress or dur_us <= 0:
+            return
+        # faststart 재mux 전 out_time 이 먼저 끝나 100% 로 보이는 것 방지 — 종료 후에만 100
+        pct = min(99.0, max(0.0, pct))
+        if pct - last_pct_report >= 0.5 or pct >= 98.5:
+            last_pct_report = pct
+            on_progress(pct)
+
+    def _handle_progress_line(line: str) -> None:
+        if not on_progress or dur_us <= 0:
+            return
+        m = out_us_re.search(line)
+        if m:
+            try:
+                _emit_pct(int(m.group(1)) / dur_us * 100.0)
+            except (ValueError, ZeroDivisionError):
+                pass
+            return
+        m2 = out_hms_re.search(line)
+        if m2:
+            try:
+                h, mi, sec = int(m2.group(1)), int(m2.group(2)), float(m2.group(3))
+                _emit_pct((h * 3600.0 + mi * 60.0 + sec) * 1_000_000.0 / dur_us * 100.0)
+            except (ValueError, ZeroDivisionError):
+                pass
+
     try:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            err_lines.append(line)
-            if on_progress and dur_us > 0:
-                m = out_ms_re.search(line)
-                if m:
-                    try:
-                        pct = min(100.0, int(m.group(1)) / dur_us * 100.0)
-                        on_progress(pct)
-                    except (ValueError, ZeroDivisionError):
-                        pass
+        assert proc.stderr is not None
+        buf = b""
+        while True:
+            chunk = proc.stderr.read(512)
+            if not chunk:
+                break
+            buf += chunk
+            while b"\n" in buf:
+                raw, buf = buf.split(b"\n", 1)
+                line = raw.decode("utf-8", errors="replace")
+                err_lines.append(line + "\n")
+                _handle_progress_line(line)
             if cancel_event and cancel_event.is_set() and proc.poll() is None:
                 cancelled = True
                 try:
@@ -1051,9 +1314,11 @@ def _run_ffmpeg_compose(
                 except OSError:
                     pass
                 break
+        if buf:
+            line = buf.decode("utf-8", errors="replace")
+            err_lines.append(line)
+            _handle_progress_line(line)
         if proc.poll() is None:
-            if proc.stdin and not proc.stdin.closed:
-                proc.stdin.close()
             try:
                 proc.wait(timeout=wait_timeout)
             except subprocess.TimeoutExpired:
@@ -1070,13 +1335,14 @@ def _run_ffmpeg_compose(
         raise
     finally:
         _set_active_ffmpeg_proc(None)
-        if proc.stdin and not proc.stdin.closed:
-            try:
-                proc.stdin.close()
-            except OSError:
-                pass
         if watcher and watcher.is_alive():
             watcher.join(timeout=0.5)
+    if cancelled or (cancel_event and cancel_event.is_set()):
+        cancelled = True
+    # 프로세스가 끝났어도 호출측 promote 전 — 여기서 100% 올리면 실패 시
+    # 「100% 됐다가 사라짐」처럼 보인다. 최대 99.5 만 표시.
+    if on_progress and not cancelled and proc.returncode == 0:
+        on_progress(99.5)
     err_text = "".join(err_lines[-80:])
     return cancelled, err_text
 
@@ -1613,6 +1879,123 @@ def _copy_video_only(src: Path, dest: Path, *, fast_copy: bool = True) -> Path:
     raise RuntimeError((r.stderr or "영상-only 복사 실패").strip()[:400])
 
 
+def _silent_audio_pad_video(src: Path, dest: Path) -> Path:
+    """영상은 유지하고 무음 AAC 를 입혀 concat 시 오디오 유무 혼재를 막는다."""
+    ff = _ffmpeg_bin()
+    if not ff:
+        return _copy_video_only(src, dest, fast_copy=True)
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dur = _probe_media_duration(src) or 1.0
+    cmd = [
+        str(ff),
+        "-y",
+        "-i",
+        str(src),
+        "-f",
+        "lavfi",
+        "-i",
+        f"anullsrc=channel_layout=stereo:sample_rate={_MERGE_AUDIO_RATE}",
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-ar",
+        str(_MERGE_AUDIO_RATE),
+        "-ac",
+        str(_MERGE_AUDIO_CHANNELS),
+        "-t",
+        f"{dur:.3f}",
+        "-shortest",
+        "-movflags",
+        "+faststart",
+        str(dest),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, **_win_subprocess_flags())
+    if r.returncode == 0 and dest.is_file() and dest.stat().st_size >= 512:
+        return dest
+    # fallback: strip audio entirely (caller may re-encode concat)
+    return _copy_video_only(src, dest, fast_copy=True)
+
+
+def _remux_clip_audio_for_merge(src: Path, dest: Path) -> Path:
+    """병합 전 클립 음성을 48kHz 스테레오 AAC로 통일 (영상은 copy)."""
+    src = Path(src)
+    dest = Path(dest)
+    if not src.is_file():
+        raise FileNotFoundError(f"영상 없음: {src}")
+    ff = _ffmpeg_bin()
+    if not ff:
+        raise RuntimeError("병합 음성 통일에 ffmpeg 가 필요합니다 (tools/ffmpeg).")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.is_file():
+        dest.unlink()
+    if not _probe_has_audio_stream(src):
+        return _silent_audio_pad_video(src, dest)
+    cmd = [
+        str(ff),
+        "-y",
+        "-i",
+        str(src),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0",
+        "-c:v",
+        "copy",
+        "-af",
+        _merge_audio_af(),
+        *_merge_audio_encode_args(),
+        "-movflags",
+        "+faststart",
+        str(dest),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, **_win_subprocess_flags())
+    if r.returncode != 0 or not dest.is_file() or dest.stat().st_size < 512:
+        raise RuntimeError((r.stderr or "병합용 음성 통일 실패").strip()[:400])
+    return dest
+
+
+def _prepare_clips_audio_for_concat(clips: list[Path], work_dir: Path) -> list[Path]:
+    """이종 음성 클립을 개별 remux 후 concat copy 가능하게 만든다."""
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    prepared: list[Path] = []
+    for i, clip in enumerate(clips, 1):
+        out = work_dir / f"_audio_norm_{i:04d}{clip.suffix.lower() or '.mp4'}"
+        prepared.append(_remux_clip_audio_for_merge(clip, out))
+    return prepared
+
+
+def merge_audio_mismatch_hint(clips: list[Path]) -> str:
+    """클립별 음성 규격(샘플레이트·채널)이 다를 때 병합 안내 문구."""
+    clips = [Path(p) for p in clips if Path(p).is_file()]
+    if len(clips) <= 1 or _clips_audio_copy_compatible(clips):
+        return ""
+    lines: list[str] = []
+    for c in clips[:10]:
+        spec = _probe_audio_params(c)
+        if spec is None:
+            lines.append(f"  · {c.name}: (무음)")
+            continue
+        rate, ch, _codec = spec
+        ch_label = "스테레오" if ch >= 2 else "모노"
+        lines.append(f"  · {c.name}: {rate}Hz {ch_label}")
+    extra = f"\n  … 외 {len(clips) - 10}개" if len(clips) > 10 else ""
+    body = "\n".join(lines) + extra
+    return (
+        "\n\n⚠ 클립마다 음성 규격이 다릅니다 (stream copy 시 음성이 빨라져 자막보다 앞서 들림).\n"
+        f"{body}\n"
+        "→ 병합 시 48kHz 스테레오로 다시 인코딩합니다."
+    )
+
+
 def concat_videos(
     clips: list[Path],
     dest: Path,
@@ -1621,6 +2004,7 @@ def concat_videos(
     on_progress: Callable[[float], None] | None = None,
     fast_copy: bool = False,
     video_only: bool = False,
+    _force_full_reencode: bool = False,
 ) -> Path:
     """클립 목록을 이어 붙여 하나의 MP4로 저장."""
     clips = [Path(p) for p in clips if Path(p).is_file()]
@@ -1643,6 +2027,23 @@ def concat_videos(
     ff = _ffmpeg_bin()
     if not ff:
         raise RuntimeError("영상 연결에 ffmpeg 가 필요합니다 (tools/ffmpeg).")
+    # 해상도·fps·음성 혼재 + stream copy → 재생 길이 팽창·후반 무음·잡음
+    video_ok = False if _force_full_reencode else _clips_video_copy_compatible(clips)
+    audio_ok = video_only or _clips_audio_copy_compatible(clips)
+    prep_dir: Path | None = None
+    if not video_only and not audio_ok and not _force_full_reencode:
+        prep_dir = dest.parent / "_concat_audio_prep"
+        clips = _prepare_clips_audio_for_concat(clips, prep_dir)
+        audio_ok = _clips_audio_copy_compatible(clips)
+    if fast_copy and not (video_ok and audio_ok):
+        return concat_videos(
+            clips,
+            dest,
+            cancel_event=cancel_event,
+            on_progress=on_progress,
+            fast_copy=False,
+            video_only=video_only,
+        )
     list_path = dest.with_suffix(".concat.txt")
     tmp = dest.with_suffix(".concat.tmp.mp4")
     lines = []
@@ -1652,25 +2053,56 @@ def concat_videos(
     list_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     cancelled = False
     err_text = ""
+    # 재인코딩 시 공통 해상도·fps (타임라인 합성과 동일)
+    norm_w, norm_h = 1920, 1080
+    params0 = _probe_video_params(clips[0])
+    if params0:
+        norm_w, norm_h = params0[0], params0[1]
+        # 폴더에 작은 미리보기·부분본이 끼면 첫 클립 해상도로 전체가 작아짐 → 다수결
+        sizes = []
+        for c in clips:
+            p = _probe_video_params(c)
+            if p:
+                sizes.append((p[0] * p[1], p[0], p[1]))
+        if sizes:
+            sizes.sort(reverse=True)
+            # 가장 큰 해상도(보통 본편 1080p)
+            _, norm_w, norm_h = sizes[0]
+    norm_vf = _normalize_video_vf(norm_w, norm_h)
     if video_only:
         encode_tail = (
             ["-map", "0:v:0", "-c:v", "copy", "-an", "-movflags", "+faststart"]
             if fast_copy
             else [
                 "-vf",
-                "setpts=PTS-STARTPTS",
+                norm_vf,
                 "-map",
                 "0:v:0",
                 *_video_only_encode_args(preset="veryfast"),
                 "-an",
             ]
         )
+    elif fast_copy and video_ok and audio_ok:
+        # 영상·음성 규격 동일 → stream copy
+        encode_tail = ["-c", "copy"]
+    elif video_ok:
+        # 영상만 동일 → 영상 copy, 음성만 48k 스테레오·loudnorm 재인코딩
+        encode_tail = [
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
+            "-c:v",
+            "copy",
+            "-af",
+            _merge_audio_af(),
+            *_merge_audio_encode_args(),
+            "-movflags",
+            "+faststart",
+        ]
     else:
-        encode_tail = (
-            ["-c", "copy"]
-            if fast_copy
-            else ["-vf", "setpts=PTS-STARTPTS", *_compatible_mp4_encode_args()]
-        )
+        # 해상도·fps 다름 → 영상+음성 통일 재인코딩
+        encode_tail = ["-vf", norm_vf, *_compatible_mp4_encode_args()]
     try:
         cmd = [
             str(ff),
@@ -1687,49 +2119,58 @@ def concat_videos(
             *encode_tail,
             str(tmp),
         ]
-        if not fast_copy:
-            cancelled, err_text = _run_ffmpeg_compose(cmd, cancel_event=cancel_event, on_progress=on_progress)
-        else:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                **_win_subprocess_flags(),
-            )
-            _set_active_ffmpeg_proc(proc)
-            watcher = _start_cancel_watcher(cancel_event, proc)
-            try:
-                if proc.stdout:
-                    proc.stdout.read()
-                cancelled = bool(cancel_event and cancel_event.is_set())
-                try:
-                    proc.wait(timeout=300)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-                    cancelled = True
-            finally:
-                _set_active_ffmpeg_proc(None)
-                if watcher and watcher.is_alive():
-                    watcher.join(timeout=0.5)
-            if on_progress:
-                on_progress(100.0)
+        total_dur = 0.0
+        for c in clips:
+            d = _probe_media_duration(c)
+            if d:
+                total_dur += d
+        progress_dur = total_dur if total_dur > 0.5 else None
+        cancelled, err_text = _run_ffmpeg_compose(
+            cmd,
+            cancel_event=cancel_event,
+            duration_sec=progress_dur,
+            on_progress=on_progress,
+            apply_duration_limit=False,
+        )
     finally:
         list_path.unlink(missing_ok=True)
     if tmp.is_file() and tmp.stat().st_size >= 512:
-        if dest.is_file():
-            dest.unlink()
-        tmp.replace(dest)
+        promoted = _promote_if_playable(tmp, dest)
+        if promoted is not None:
+            if cancelled:
+                raise ComposeStopped(promoted, f"합성 중지 — {promoted.name}")
+            if not video_only and total_dur > 0.5 and not _mux_output_av_ok(
+                promoted, vid_dur=total_dur
+            ):
+                promoted.unlink(missing_ok=True)
+                if not _force_full_reencode:
+                    if on_progress:
+                        on_progress(0.0)
+                    return concat_videos(
+                        clips,
+                        dest,
+                        cancel_event=cancel_event,
+                        on_progress=on_progress,
+                        fast_copy=False,
+                        video_only=video_only,
+                        _force_full_reencode=True,
+                    )
+                raise RuntimeError(
+                    "병합 후 음성·영상 길이가 맞지 않습니다. "
+                    "클립별 음성 규격(44.1k/48k·모노/스테레오)을 확인하고 다시 병합하세요."
+                )
+            return promoted
+        # moov 없는 조각 — 중지 시 깨진 all.mp4 로 올리지 않음
         if cancelled:
-            raise ComposeStopped(dest, f"합성 중지 — {dest.name}")
-        return dest
-    tmp.unlink(missing_ok=True)
-    if cancelled:
-        raise ComposeStopped(None, "합성이 중지되었습니다.")
+            raise ComposeStopped(None, "합성이 중지되었습니다.")
+    else:
+        tmp.unlink(missing_ok=True)
+        if cancelled:
+            raise ComposeStopped(None, "합성이 중지되었습니다.")
     if fast_copy:
+        # copy 실패 후 재인코딩 — 앞서 보낸 100% 를 되돌림
+        if on_progress:
+            on_progress(0.0)
         return concat_videos(
             clips,
             dest,
@@ -1741,6 +2182,67 @@ def concat_videos(
     raise RuntimeError((err_text or "ffmpeg 연결 실패").strip()[:400])
 
 
+def _probe_audio_stream_duration(path: Path) -> float | None:
+    """첫 오디오 스트림 길이(초). format duration 보다 트랙 기준이 정확하다."""
+    fp = _ffprobe_bin()
+    if not fp:
+        return None
+    cmd = [
+        str(fp),
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    try:
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            **_win_subprocess_flags(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    raw = (r.stdout or "").strip().splitlines()
+    if not raw or raw[0] in ("", "N/A"):
+        return _probe_media_duration(path)
+    try:
+        dur = float(raw[0])
+        return dur if dur > 0 else None
+    except ValueError:
+        return _probe_media_duration(path)
+
+
+def _mux_output_av_ok(path: Path, *, vid_dur: float | None, tol: float = 1.25) -> bool:
+    """MP3 mux 결과: 오디오 있고, 영상 길이 대비 크게 짧거나 길지 않음."""
+    if not path.is_file() or path.stat().st_size < 512:
+        return False
+    if not _probe_has_audio_stream(path):
+        return False
+    if not vid_dur or vid_dur <= 0.05:
+        return True
+    out_dur = _probe_media_duration(path) or 0.0
+    aud_dur = _probe_audio_stream_duration(path) or 0.0
+    # 마지막 프레임 고정(음성만 김) / 후반 무음(음성만 짧음) 방지
+    if aud_dur > 0 and aud_dur - vid_dur > tol:
+        return False
+    if aud_dur > 0 and vid_dur - aud_dur > tol:
+        return False
+    if out_dur > 0 and abs(out_dur - vid_dur) > max(tol, vid_dur * 0.02):
+        return False
+    return True
+
+
 def mux_mp3_to_video(
     video: Path,
     audio: Path,
@@ -1750,7 +2252,7 @@ def mux_mp3_to_video(
     on_progress: Callable[[float], None] | None = None,
     fast_copy: bool = False,
 ) -> Path:
-    """영상에 MP3 음성을 입혀 저장 (영상 길이 유지, 음성은 무음 패드)."""
+    """영상에 MP3 음성을 입혀 저장 (영상 길이에 맞춤: 짧으면 무음 패드, 길면 자름)."""
     video = Path(video)
     audio = Path(audio)
     dest = Path(dest)
@@ -1767,14 +2269,21 @@ def mux_mp3_to_video(
     vcopy = ["-c:v", "copy"] if fast_copy else _video_only_encode_args(preset="veryfast")
     vencode = _video_only_encode_args(preset="veryfast")
     audio_tail = ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
+    # atrim: MP3가 영상보다 길면 끝에서  freeze 방지 / apad: 짧으면 후반 무음 방지
+    af_fit = (
+        f"[1:a]aformat=sample_fmts=fltp:channel_layouts=stereo,"
+        f"atrim=0:{vid_dur:.3f},apad=whole_dur={vid_dur:.3f},asetpts=PTS-STARTPTS[aout]"
+        if vid_dur and vid_dur > 0.05
+        else None
+    )
 
-    attempts: list[tuple[list[str], str | None]] = []
-    if vid_dur and vid_dur > 0.05:
+    attempts: list[tuple[list[str], float | None]] = []
+    if af_fit:
         attempts.append(
             (
                 [
                     "-filter_complex",
-                    f"[1:a]apad=whole_dur={vid_dur:.3f}[aout]",
+                    af_fit,
                     "-map",
                     "0:v:0",
                     "-map",
@@ -1782,9 +2291,26 @@ def mux_mp3_to_video(
                     *vcopy,
                     *audio_tail,
                 ],
-                "apad",
+                vid_dur,
             )
         )
+        attempts.append(
+            (
+                [
+                    "-filter_complex",
+                    af_fit,
+                    "-map",
+                    "0:v:0",
+                    "-map",
+                    "[aout]",
+                    *vencode,
+                    *audio_tail,
+                ],
+                vid_dur,
+            )
+        )
+    # 최후: 직접 맵 + 반드시 영상 길이로 절단 (미절단 시 끝 프레임 고정)
+    dur_cap = vid_dur if vid_dur and vid_dur > 0.05 else None
     attempts.extend(
         [
             (
@@ -1796,7 +2322,7 @@ def mux_mp3_to_video(
                     *vcopy,
                     *audio_tail,
                 ],
-                "direct",
+                dur_cap,
             ),
             (
                 [
@@ -1807,14 +2333,14 @@ def mux_mp3_to_video(
                     *vencode,
                     *audio_tail,
                 ],
-                "reencode",
+                dur_cap,
             ),
         ]
     )
 
     cancelled = False
     err_text = ""
-    for idx, (tail, _tag) in enumerate(attempts):
+    for idx, (tail, limit_dur) in enumerate(attempts):
         if tmp.is_file():
             tmp.unlink(missing_ok=True)
         cmd = [
@@ -1830,15 +2356,20 @@ def mux_mp3_to_video(
             *tail,
             str(tmp),
         ]
-        cancelled, err_text = _run_ffmpeg_compose(cmd, cancel_event=cancel_event, on_progress=on_progress)
-        if tmp.is_file() and tmp.stat().st_size >= 512 and _probe_has_audio_stream(tmp):
+        cancelled, err_text = _run_ffmpeg_compose(
+            cmd,
+            cancel_event=cancel_event,
+            duration_sec=limit_dur,
+            on_progress=on_progress,
+        )
+        if _mux_output_av_ok(tmp, vid_dur=vid_dur):
             break
         if cancelled:
             break
         if idx + 1 >= len(attempts):
             break
 
-    if tmp.is_file() and tmp.stat().st_size >= 512 and _probe_has_audio_stream(tmp):
+    if _mux_output_av_ok(tmp, vid_dur=vid_dur):
         if dest.is_file():
             dest.unlink()
         tmp.replace(dest)
@@ -1849,7 +2380,6 @@ def mux_mp3_to_video(
     if cancelled:
         raise ComposeStopped(None, "합성이 중지되었습니다.")
     raise RuntimeError((err_text or "MP3 음성 합성 실패 — ffmpeg·MP3 파일을 확인하세요.").strip()[:400])
-
 
 ComposeProgressFn = Callable[[float, float | None, int, int], None]
 ComposeLogFn = Callable[[str], None]
@@ -2007,7 +2537,7 @@ def overlay_announcer_circle(
     *,
     cancel_event: threading.Event | None = None,
     on_progress: Callable[[float], None] | None = None,
-    size_ratio: float = 0.09,
+    size_ratio: float = 0.135,
     margin_px: int = 8,
 ) -> Path:
     """메인 영상 우측 하단 코너에 아나운서 MP4를 원형 PiP로 오버레이 (음성 제외·루프)."""
@@ -2022,8 +2552,8 @@ def overlay_announcer_circle(
     if not ff:
         raise RuntimeError("아나운서 오버레이에 ffmpeg 가 필요합니다 (tools/ffmpeg).")
     size = _probe_video_size(video) or (1280, 720)
-    # 이전 대비 ~50% (ratio 0.18→0.09), 우측 하단 코너에 붙임
-    pip = max(48, min(160, int(min(size) * float(size_ratio))))
+    # 짧은 변 기준 ~13.5% (기존 0.09 대비 약 +50%), 상한 240px
+    pip = max(48, min(240, int(min(size) * float(size_ratio))))
     if pip % 2:
         pip += 1
     margin = max(4, int(margin_px))
@@ -2073,6 +2603,179 @@ def overlay_announcer_circle(
         raise ComposeStopped(dest if dest.is_file() else None, "아나운서 오버레이 중지")
     if not dest.is_file() or dest.stat().st_size < 512:
         raise RuntimeError(_ffmpeg_error_detail(err_text, "아나운서 오버레이 실패"))
+    return dest
+
+
+def compose_folder_mp4s_to_all_mp4(
+    clips: list[Path],
+    dest: Path,
+    work_dir: Path,
+    *,
+    audio_mp3: Path | None = None,
+    add_announcer: bool = True,
+    announcer_mp4: Path | None = None,
+    mute_names: set[str] | None = None,
+    cancel_event: threading.Event | None = None,
+    on_progress: ComposeProgressFn | None = None,
+    on_log: ComposeLogFn | None = None,
+) -> Path:
+    """폴더 MP4를 순서대로 이어 붙여 ``all.mp4`` 생성 (SRT 타임라인 없음).
+
+    ``mute_names``: 소문자 파일명 집합 — MP3 미사용 시 해당 클립만 무음 처리.
+    """
+    clips = [Path(p) for p in clips if Path(p).is_file()]
+    if not clips:
+        raise ValueError("병합할 MP4가 없습니다.")
+    dest = Path(dest)
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    total = len(clips)
+    mp3_path = Path(audio_mp3) if audio_mp3 else None
+    mux_mp3 = bool(mp3_path and mp3_path.is_file())
+    mute_set = {n.strip().lower() for n in (mute_names or set()) if n and str(n).strip()}
+    need_mute_prep = (not mux_mp3) and any(c.name.lower() in mute_set for c in clips)
+    prep_weight = 0.08 if need_mute_prep else 0.0
+    concat_weight = 0.82 if mux_mp3 else 0.92
+    audio_weight = 0.08 if mux_mp3 else 0.0
+    announcer_weight = 0.1 if add_announcer else 0.0
+    concat_weight = max(0.4, concat_weight - prep_weight)
+    if announcer_weight > 0 and prep_weight + concat_weight + audio_weight + announcer_weight > 1.0:
+        concat_weight = max(0.4, 1.0 - prep_weight - audio_weight - announcer_weight)
+
+    def _log(msg: str) -> None:
+        if on_log:
+            on_log(msg)
+
+    def report(overall: float, mark_sec: float | None, idx: int) -> None:
+        if on_progress:
+            on_progress(min(99.9, overall), mark_sec, idx, total)
+
+    _log(f"[폴더 병합] {total}개 MP4 → {dest.name}")
+    audio_hint = merge_audio_mismatch_hint(clips)
+    if audio_hint:
+        _log(audio_hint.strip())
+    report(0.0, None, 0)
+    prepared: list[Path] = []
+    for i, c in enumerate(clips, 1):
+        muted = (not mux_mp3) and (c.name.lower() in mute_set)
+        if need_mute_prep:
+            report(prep_weight * (i - 1) / max(1, total) * 100.0, -1.0 if muted else -2.0, i)
+        if muted:
+            silent = work_dir / f"_mute_{i:04d}{c.suffix.lower() or '.mp4'}"
+            _log(f"  #{i:02d} {c.name} (음소거)")
+            if cancel_event and cancel_event.is_set():
+                raise ComposeStopped(None, "합성이 중지되었습니다.")
+            _silent_audio_pad_video(c, silent)
+            prepared.append(silent)
+        else:
+            _log(f"  #{i:02d} {c.name}")
+            prepared.append(c)
+    if need_mute_prep:
+        report(prep_weight * 100.0, None, 0)
+
+    video_dest = work_dir / "_folder_concat.mp4" if (mux_mp3 or add_announcer) else dest
+
+    def concat_progress(pct: float) -> None:
+        report(prep_weight * 100.0 + pct * concat_weight, None, 0)
+
+    if cancel_event and cancel_event.is_set():
+        raise ComposeStopped(None, "합성이 중지되었습니다.")
+
+    concat_videos(
+        prepared,
+        video_dest,
+        cancel_event=cancel_event,
+        on_progress=concat_progress,
+        fast_copy=True,
+        video_only=mux_mp3,
+    )
+    _log(f"[연결 완료] {video_dest.name}")
+    if cancel_event and cancel_event.is_set():
+        if video_dest.is_file():
+            saved = (
+                _promote_if_playable(video_dest, dest)
+                if video_dest != dest
+                else (dest if _is_playable_mp4(dest) else None)
+            )
+            if saved is not None:
+                raise ComposeStopped(saved, f"합성 중지 — {saved.name}")
+            if video_dest != dest:
+                video_dest.unlink(missing_ok=True)
+        raise ComposeStopped(None, "합성이 중지되었습니다. (미완성 파일은 저장하지 않음)")
+
+    if add_announcer:
+        from mp4_search.paths import resolve_announcer_mp4
+
+        if announcer_mp4 and Path(announcer_mp4).is_file():
+            ann_path = Path(announcer_mp4)
+        else:
+            ann_path = resolve_announcer_mp4(
+                str(announcer_mp4) if announcer_mp4 else ""
+            )
+        if ann_path is None or not ann_path.is_file():
+            _log(
+                "[경고] 아나운서 파일 없음 — 건너뜀 "
+                r"(무협극장\anouncer\*.mp4)"
+            )
+        else:
+            pip_dest = work_dir / "_folder_announcer.mp4"
+            _log(f"[아나운서 오버레이] {ann_path.name} → 우측하단 원형")
+
+            def pip_progress(pct: float) -> None:
+                overall = (prep_weight + concat_weight) * 100.0 + pct * announcer_weight
+                report(min(99.0, overall), None, 0)
+
+            try:
+                overlay_announcer_circle(
+                    video_dest,
+                    ann_path,
+                    pip_dest,
+                    cancel_event=cancel_event,
+                    on_progress=pip_progress,
+                )
+                if video_dest != dest and video_dest.is_file() and video_dest != pip_dest:
+                    video_dest.unlink(missing_ok=True)
+                video_dest = pip_dest
+                _log(f"[아나운서 오버레이 완료] {pip_dest.name}")
+            except ComposeStopped:
+                if pip_dest.is_file() and pip_dest.stat().st_size >= 512:
+                    if video_dest != dest and video_dest.is_file() and video_dest != pip_dest:
+                        video_dest.unlink(missing_ok=True)
+                    saved = _promote_if_playable(pip_dest, dest)
+                    if saved is not None:
+                        raise ComposeStopped(saved, f"합성 중지 — {saved.name}")
+                raise ComposeStopped(None, "합성이 중지되었습니다. (미완성 파일은 저장하지 않음)")
+
+    if mux_mp3:
+        report((prep_weight + concat_weight + announcer_weight) * 100.0, None, -1)
+        _log(f"[MP3 음성 합성 시작] {mp3_path.name} → {dest.name}")
+
+        def audio_progress(pct: float) -> None:
+            overall = (prep_weight + concat_weight + announcer_weight) * 100.0 + pct * audio_weight
+            report(overall, None, -1)
+
+        mux_mp3_to_video(
+            video_dest,
+            mp3_path,
+            dest,
+            cancel_event=cancel_event,
+            on_progress=audio_progress,
+            fast_copy=True,
+        )
+        if video_dest != dest and video_dest.is_file():
+            video_dest.unlink(missing_ok=True)
+        _log(f"[MP3 음성 합성 완료] {dest.name}")
+    elif video_dest != dest:
+        if _promote_if_playable(video_dest, dest) is None:
+            raise RuntimeError("영상 연결 결과가 불완전합니다 (moov 없음). 다시 합성하세요.")
+
+    if on_progress:
+        on_progress(100.0, None, total, total)
+    if cancel_event and cancel_event.is_set():
+        if _is_playable_mp4(dest):
+            raise ComposeStopped(dest, f"합성 중지 — {dest.name}")
+        dest.unlink(missing_ok=True)
+        raise ComposeStopped(None, "합성이 중지되었습니다. (미완성 파일은 저장하지 않음)")
     return dest
 
 
@@ -2290,7 +2993,7 @@ def compose_timeline_to_all_mp4(
         if ann_path is None or not ann_path.is_file():
             _log(
                 "[경고] 아나운서 파일 없음 — 건너뜀 "
-                r"(C:\무협극장\anouncer\*.mp4)"
+                r"(무협극장\anouncer\*.mp4)"
             )
         else:
             pip_dest = work_dir / "_concat_announcer.mp4"
@@ -2343,20 +3046,21 @@ def compose_timeline_to_all_mp4(
             )
         except ComposeStopped:
             stopped = True
-            if not dest.is_file():
-                raise
+            if not _is_playable_mp4(dest):
+                dest.unlink(missing_ok=True)
+                raise ComposeStopped(None, "합성이 중지되었습니다. (미완성 파일은 저장하지 않음)")
         _log(f"[MP3 음성 합성 완료] {dest.name}")
         if video_dest != dest and video_dest.is_file():
             video_dest.unlink(missing_ok=True)
     elif video_dest != dest:
-        if dest.is_file():
-            dest.unlink()
-        video_dest.replace(dest)
+        if _promote_if_playable(video_dest, dest) is None:
+            raise RuntimeError("영상 연결 결과가 불완전합니다 (moov 없음). 다시 합성하세요.")
 
     if stopped:
-        if dest.is_file():
+        if _is_playable_mp4(dest):
             raise ComposeStopped(dest, f"합성 중지 — {dest.name}")
-        raise ComposeStopped(None, "합성이 중지되었습니다.")
+        dest.unlink(missing_ok=True)
+        raise ComposeStopped(None, "합성이 중지되었습니다. (미완성 파일은 저장하지 않음)")
 
     if on_progress:
         on_progress(100.0, None, total, total)
@@ -2385,12 +3089,13 @@ def stop_preview_players() -> None:
                 pass
 
 
-def play_video(path: Path, *, loop: bool = False, max_sec: float = _PREVIEW_MAX_SEC) -> None:
+def play_video(path: Path, *, loop: bool = False, mute: bool = False, max_sec: float = _PREVIEW_MAX_SEC) -> None:
     """ffplay(우선)로 미리보기 재생.
 
     - 새 재생 시작 시 이전 미리보기는 즉시 종료
     - 1회 재생은 ``-autoexit`` 로 끝나면 창 닫힘
     - 반복·장시간 클립도 ``max_sec``(기본 30초) 후 강제 종료
+    - ``mute`` 이면 ``-an`` (그리드 음소거 콤보)
     - OS 기본 플레이어(fallback)는 프로세스 제어가 어려워 ffplay 없을 때만 사용
     """
     global _preview_kill_timer
@@ -2402,6 +3107,8 @@ def play_video(path: Path, *, loop: bool = False, max_sec: float = _PREVIEW_MAX_
     ff = _ffmpeg_exe("ffplay")
     if ff:
         cmd = [str(ff), "-autoexit", "-window_title", "7_3 mp4Search"]
+        if mute:
+            cmd.extend(["-an"])
         if loop:
             cmd[1:1] = ["-loop", "0"]
         cmd.append(str(path))

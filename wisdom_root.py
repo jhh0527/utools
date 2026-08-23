@@ -12,14 +12,12 @@ MARKER_DIRS = (
     "2_1_ttsToVoice",
     "2_2_imgDown",
     "4_2_ShortVideo",
-    "1_1_textTo700Text",
     "7_2_mp4Edit",
 )
 
 # canonical → 예전 폴더명 (작업 폴더·저장 경로 호환)
 MODULE_LEGACY_ALIASES: dict[str, tuple[str, ...]] = {
-    "1_1_textTo700Text": ("1_textTo700Text",),
-    "1_2_textToTts": ("2_textToTts",),
+    "1_2_textToJson": ("1_2_textToTts", "2_textToTts"),
     "2_1_ttsToVoice": ("3_ttsToVoice",),
     "2_2_srtToImage": ("4_srtToImage",),
     "3_1_pngFileName": ("4_2pngFileName",),
@@ -78,7 +76,6 @@ def looks_like_wisdom_root(p: Path) -> bool:
         "3_ttsToVoice",
         "5_video",
         "4_srtToImage",
-        "1_textTo700Text",
     )
     legacy_hits = sum(1 for name in legacy_markers if (r / name).is_dir())
     return legacy_hits >= 2

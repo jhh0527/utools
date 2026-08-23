@@ -84,6 +84,92 @@ def save_mp4_play_modes(modes: dict[int, str]) -> None:
     p.write_text(json.dumps(base, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def load_mp4_mute() -> dict[int, str]:
+    p = config_path()
+    if not p.is_file():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    raw = data.get("mp4_mute")
+    if not isinstance(raw, dict):
+        return {}
+    from mp4_search.mp4_play_modes import normalize_mp4_mute
+
+    out: dict[int, str] = {}
+    for k, v in raw.items():
+        try:
+            n = int(str(k).strip())
+        except ValueError:
+            continue
+        out[n] = normalize_mp4_mute(v)
+    return out
+
+
+def save_mp4_mute(modes: dict[int, str]) -> None:
+    from mp4_search.mp4_play_modes import normalize_mp4_mute
+
+    p = config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    base: dict = {}
+    if p.is_file():
+        try:
+            cur = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(cur, dict):
+                base = cur
+        except (OSError, json.JSONDecodeError):
+            base = {}
+    base["mp4_mute"] = {
+        str(k): normalize_mp4_mute(v) for k, v in sorted(modes.items())
+    }
+    p.write_text(json.dumps(base, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def load_mp4_mute_files() -> dict[str, str]:
+    """파일명(소문자) → 음소거 — 폴더 병합(``1장.mp4`` 등)용."""
+    p = config_path()
+    if not p.is_file():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    raw = data.get("mp4_mute_files")
+    if not isinstance(raw, dict):
+        return {}
+    from mp4_search.mp4_play_modes import normalize_mp4_mute
+
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        if isinstance(k, str) and k.strip():
+            out[k.strip().lower()] = normalize_mp4_mute(v)
+    return out
+
+
+def save_mp4_mute_files(modes: dict[str, str]) -> None:
+    from mp4_search.mp4_play_modes import normalize_mp4_mute
+
+    p = config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    base: dict = {}
+    if p.is_file():
+        try:
+            cur = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(cur, dict):
+                base = cur
+        except (OSError, json.JSONDecodeError):
+            base = {}
+    base["mp4_mute_files"] = {
+        str(k).lower(): normalize_mp4_mute(v) for k, v in sorted(modes.items())
+    }
+    p.write_text(json.dumps(base, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def save_download_mp4_inputs(inputs: dict[str, str]) -> None:
     p = config_path()
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -136,6 +222,10 @@ def load_gui_settings() -> dict[str, str]:
         out["add_announcer"] = "1" if bool(data.get("add_announcer")) else "0"
     else:
         out["add_announcer"] = "1"
+    if "folder_merge" in data:
+        out["folder_merge"] = "1" if bool(data.get("folder_merge")) else "0"
+    else:
+        out["folder_merge"] = "0"
     return out
 
 
@@ -150,6 +240,7 @@ def save_gui_settings(
     burn_subtitles: bool | None = None,
     add_announcer: bool | None = None,
     announcer_file: str | None = None,
+    folder_merge: bool | None = None,
 ) -> None:
     p = config_path()
     data: dict = {}
@@ -178,5 +269,7 @@ def save_gui_settings(
         data["add_announcer"] = bool(add_announcer)
     if announcer_file is not None:
         data["announcer_file"] = str(announcer_file).strip()
+    if folder_merge is not None:
+        data["folder_merge"] = bool(folder_merge)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")

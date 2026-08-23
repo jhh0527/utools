@@ -168,11 +168,15 @@ def resolve_module_output(module: str) -> Path:
     return module_output(module)
 
 
-def folder_dialog_initial(preferred: Path | None = None) -> str:
+def folder_dialog_initial(preferred: Path | str | None = None) -> str:
     """폴더 선택 대화상자 ``initialdir`` — 작업 폴더 우선."""
-    if preferred is not None:
+    pref: Path | None = None
+    if preferred is not None and str(preferred).strip():
+        pref = Path(preferred).expanduser()
+
+    if pref is not None:
         try:
-            p = preferred.expanduser().resolve()
+            p = pref.resolve()
             if p.is_file():
                 p = p.parent
             if p.is_dir():
@@ -182,9 +186,9 @@ def folder_dialog_initial(preferred: Path | None = None) -> str:
     ws = get_workspace_dir()
     if ws is not None:
         return str(ws)
-    if preferred is not None:
+    if pref is not None:
         try:
-            p = preferred.expanduser().resolve()
+            p = pref.resolve()
             if p.is_file():
                 p = p.parent
             if p.parent.is_dir():

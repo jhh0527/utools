@@ -1,0 +1,9 @@
+# 2_2_scriptToVoice
+
+GUI: `dist/2_2_scriptToVoice_gui.exe` / `run_script_voice_gui.py`
+
+- 대본에 `[1]` `[2]` … 단락 마커
+- **변환** → `루트/mp3/01.mp3`, `02.mp3`, … (중간 파트 유지)
+- **병합** → 단락 사이 텀(기본 1초 무음) 후 `루트/mp3/all.mp3` (또는 chunk_id)
+- **변환** 시 진행률(%) 표시
+- Voice/API: `2_1_ttsToVoice/dist/elsub_config*.json` 우선

@@ -41,11 +41,7 @@ def load_tab_ui(module: str, container: tk.Misc) -> None:
         return
     _ensure_module_path(module)
     try:
-        if module == "1_1_textTo700Text":
-            import manuscript_700_splitter as m
-
-            m.run_gui(container=container)
-        elif module == "2_1_ttsToVoice":
+        if module == "2_1_ttsToVoice":
             from elsub.gui_app import main
 
             main(container=container)
@@ -53,7 +49,7 @@ def load_tab_ui(module: str, container: tk.Misc) -> None:
             from img_down.gui_app import main
 
             main(container=container)
-        elif module == "2_3_sceneImage":
+        elif module == "2_5_sceneImage":
             from scene_image.gui_app import main
 
             main(container=container)

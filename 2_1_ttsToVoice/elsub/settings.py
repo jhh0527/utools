@@ -173,7 +173,7 @@ def resolve_output_dir() -> Path:
 
 
 def default_input_dir() -> Path:
-    """기본 입력: 작업 폴더 ``mp3`` (없으면 ``1_2_textToTts/output``)."""
+    """기본 입력: 작업 폴더 ``mp3`` (없으면 ``1_2_textToJson/output``)."""
     try:
         from wisdom_content_paths import default_mp3_dir
 
@@ -184,11 +184,11 @@ def default_input_dir() -> Path:
         pass
     ws = get_workspace_dir()
     if ws is not None:
-        tts_out = ws / "1_2_textToTts" / OUTPUT_DIRNAME
+        tts_out = ws / "1_2_textToJson" / OUTPUT_DIRNAME
         if tts_out.is_dir():
             return tts_out
         return ws
-    tts_out = module_dir("1_2_textToTts") / OUTPUT_DIRNAME
+    tts_out = module_dir("1_2_textToJson") / OUTPUT_DIRNAME
     if tts_out.is_dir():
         return tts_out
     local = module_dir(PROJECT_DIRNAME) / INPUT_DIRNAME

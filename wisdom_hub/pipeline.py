@@ -5,10 +5,9 @@ from __future__ import annotations
 
 # (탭 제목, 모듈 폴더명)
 HUB_TABS: tuple[tuple[str, str], ...] = (
-    ("1_1 대본700", "1_1_textTo700Text"),
     ("2_1 TTS", "2_1_ttsToVoice"),
     ("2_2 이미지다운", "2_2_imgDown"),
-    ("2_3 씬이미지", "2_3_sceneImage"),
+    ("2_5 씬이미지", "2_5_sceneImage"),
     ("3_1 PNG이름", "3_1_pngFileName"),
     ("3_2 PNG→JPG", "3_2_pngToJpg"),
     ("4_2 쇼츠", "4_2_ShortVideo"),

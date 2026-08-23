@@ -26,15 +26,23 @@ from mp4_search.mp4_play_modes import (
     MP4_MODE_HOLD,
     MP4_MODE_LOOP,
     MP4_MODE_LABELS_LIST,
+    MP4_MUTE_BY_LABEL,
+    MP4_MUTE_LABELS_LIST,
+    MP4_MUTE_OFF,
+    is_mp4_muted,
+    mp4_mute_label,
     mp4_play_mode_label,
+    normalize_mp4_mute,
     normalize_mp4_play_mode,
 )
 from mp4_search.download import (
     ComposeStopped,
     _probe_media_duration,
     abort_compose_ffmpeg,
+    compose_folder_mp4s_to_all_mp4,
     compose_timeline_to_all_mp4,
     copy_local_image_as_png,
+    merge_audio_mismatch_hint,
     optimize_srt_images_in_folder,
     copy_local_video,
     download_thumbnail,
@@ -48,6 +56,7 @@ from mp4_search.download import (
 )
 from mp4_search.naming import (
     ALL_MP4_NAME,
+    list_folder_mp4s_for_merge,
     scan_srt_assets,
     srt_mp4_name,
     srt_png_name,
@@ -68,6 +77,7 @@ from mp4_search.timeline_compose import (
     timeline_total_sec,
 )
 from mp4_search.paths import (
+    announcer_dir,
     default_output_dir,
     list_announcer_mp4s,
     media_dirs_for_srt,
@@ -80,9 +90,13 @@ from mp4_search.paths import (
 from mp4_search.settings import (
     load_download_mp4_inputs,
     load_gui_settings,
+    load_mp4_mute,
+    load_mp4_mute_files,
     load_mp4_play_modes,
     save_download_mp4_inputs,
     save_gui_settings,
+    save_mp4_mute,
+    save_mp4_mute_files,
     save_mp4_play_modes,
 )
 from mp4_search.srt_parse import format_ms_short, parse_srt_cues_timed
@@ -104,6 +118,7 @@ _COL_KEYWORD = "keyword"
 _COL_DOWNLOAD = "download_mp4"
 _COL_MP4 = "mp4_file"
 _COL_MP4_MODE = "mp4_mode"
+_COL_MP4_MUTE = "mp4_mute"
 _COL_PNG_FX = "png_fx"
 _COL_CUE = "cue"
 _KEYWORD_COL_WIDTH = 140
@@ -126,6 +141,7 @@ class CueRow:
     cue_ids: list[int] = field(default_factory=list)
     mp4_path: Path | None = None
     mp4_play_mode: str = MP4_MODE_LOOP
+    mp4_mute: str = MP4_MUTE_OFF
     png_path: Path | None = None
     png_effect: str = "fixed"
     query: str = ""
@@ -184,17 +200,13 @@ def main(*, container: tk.Misc | None = None) -> None:
     srt_var = tk.StringVar(value=srt_init)
     burn_sub_c = tk.BooleanVar(value=cfg.get("burn_subtitles", "1") != "0")
     add_announcer_c = tk.BooleanVar(value=cfg.get("add_announcer", "1") != "0")
-    _ann_files0 = list_announcer_mp4s()
-    _ann_names0 = [p.name for p in _ann_files0]
+    folder_merge_c = tk.BooleanVar(value=cfg.get("folder_merge", "0") == "1")
     _ann_saved = (cfg.get("announcer_file") or "").strip()
-    if _ann_saved:
-        _ann_init = Path(_ann_saved).name
-        if _ann_init not in _ann_names0 and _ann_names0:
-            _ann_init = _ann_names0[0]
-        elif _ann_init not in _ann_names0:
-            _ann_init = _ann_saved
+    if _ann_saved and Path(_ann_saved).is_file():
+        _ann_init = str(Path(_ann_saved))
     else:
-        _ann_init = _ann_names0[0] if _ann_names0 else ""
+        _ann_resolved = resolve_announcer_mp4(_ann_saved)
+        _ann_init = str(_ann_resolved) if _ann_resolved else ""
     announcer_var = tk.StringVar(value=_ann_init)
     mp4_var = tk.StringVar(value=cfg.get("mp4_dir", "") or str(default_output_dir()))
     mp3_var = tk.StringVar(value=mp3_init)
@@ -210,6 +222,8 @@ def main(*, container: tk.Misc | None = None) -> None:
     rows: dict[str, CueRow] = {}
     download_mp4_inputs: dict[str, str] = load_download_mp4_inputs()
     mp4_play_modes: dict[int, str] = load_mp4_play_modes()
+    mp4_mute_map: dict[int, str] = load_mp4_mute()
+    mp4_mute_files: dict[str, str] = load_mp4_mute_files()
     thumb_refs: list[tk.PhotoImage] = []
     preview_pane_w = int(cfg.get("preview_pane_width", str(_PREVIEW_PANE_DEFAULT)) or _PREVIEW_PANE_DEFAULT)
 
@@ -234,8 +248,11 @@ def main(*, container: tk.Misc | None = None) -> None:
             burn_subtitles=bool(burn_sub_c.get()),
             add_announcer=bool(add_announcer_c.get()),
             announcer_file=announcer_var.get().strip(),
+            folder_merge=bool(folder_merge_c.get()),
         )
         save_mp4_play_modes(mp4_play_modes)
+        save_mp4_mute(mp4_mute_map)
+        save_mp4_mute_files(mp4_mute_files)
 
     def _mp4_asset_number(path: Path | None) -> int | None:
         if path is None or not path.is_file():
@@ -255,38 +272,86 @@ def main(*, container: tk.Misc | None = None) -> None:
                 row.mp4_play_mode = mode
                 refresh_tree_values(iid)
 
+    def _mp4_mute_for_asset(asset_n: int) -> str:
+        return normalize_mp4_mute(mp4_mute_map.get(asset_n, MP4_MUTE_OFF))
+
+    def _set_mp4_mute_for_asset(asset_n: int, mute: str) -> None:
+        mute = normalize_mp4_mute(mute)
+        mp4_mute_map[int(asset_n)] = mute
+        save_mp4_mute(mp4_mute_map)
+        for iid, row in rows.items():
+            n = _mp4_asset_number(row.mp4_path)
+            if n == int(asset_n):
+                row.mp4_mute = mute
+                refresh_tree_values(iid)
+
+    def _mute_value_for_path(path: Path | None) -> str:
+        if path is None:
+            return MP4_MUTE_OFF
+        n = parse_srt_asset_number(path.name)
+        if n is not None:
+            return _mp4_mute_for_asset(n)
+        return normalize_mp4_mute(mp4_mute_files.get(path.name.lower(), MP4_MUTE_OFF))
+
+    def _set_mute_for_path(path: Path, mute: str) -> None:
+        mute = normalize_mp4_mute(mute)
+        n = parse_srt_asset_number(path.name)
+        if n is not None:
+            _set_mp4_mute_for_asset(n, mute)
+            return
+        key = path.name.lower()
+        mp4_mute_files[key] = mute
+        save_mp4_mute_files(mp4_mute_files)
+        for iid, row in rows.items():
+            if row.mp4_path and row.mp4_path.name.lower() == key:
+                row.mp4_mute = mute
+                refresh_tree_values(iid)
+
     def _loop_for_path(path: Path) -> bool:
         n = _mp4_asset_number(path)
         if n is None:
             return False
         return _mp4_mode_for_asset(n) == MP4_MODE_LOOP
 
+    def _mute_for_path(path: Path) -> bool:
+        return is_mp4_muted(_mute_value_for_path(path))
+
     def play_media(path: Path) -> None:
-        play_video(path, loop=_loop_for_path(path))
+        play_video(path, loop=_loop_for_path(path), mute=_mute_for_path(path))
+
+    def folder_merge_mode() -> bool:
+        return bool(folder_merge_c.get())
 
     def apply_media_paths_from_srt(*, force_mp3: bool = True) -> None:
-        """SRT 상위의 ``mp4``·``mp3`` 폴더를 자동 지정 (이후 수동 변경 가능)."""
+        """SRT 상위의 ``mp4`` 폴더·``mp3/all.mp3`` 를 자동 지정 (이후 수동 변경 가능)."""
         srt = Path(srt_var.get().strip())
         if not srt.is_file():
             return
-        mp4_d, _mp3_d = media_dirs_for_srt(srt)
+        mp4_d, mp3_d = media_dirs_for_srt(srt)
         mp4_var.set(str(mp4_d))
-        if force_mp3 or not (mp3_var.get().strip() and Path(mp3_var.get().strip()).is_file()):
-            found = resolve_mp3_for_srt(srt)
-            if found:
-                mp3_var.set(str(found))
+        if force_mp3 or not mp3_var.get().strip():
+            # mp4 폴더와 같이: 선택한 SRT 콘텐츠 루트의 mp3/all.mp3 경로
+            mp3_var.set(str(mp3_d / "all.mp3"))
 
     def suggest_mp3_from_srt() -> Path | None:
-        if mp3_var.get().strip() and Path(mp3_var.get().strip()).is_file():
-            return Path(mp3_var.get().strip())
+        cur = mp3_var.get().strip()
+        if cur and Path(cur).is_file():
+            return Path(cur)
         srt = Path(srt_var.get().strip())
         if not srt.is_file():
             return None
+        _mp4_d, mp3_d = media_dirs_for_srt(srt)
+        preferred = mp3_d / "all.mp3"
+        if preferred.is_file():
+            mp3_var.set(str(preferred))
+            return preferred
         found = resolve_mp3_for_srt(srt)
         if found:
             mp3_var.set(str(found))
             return found
-        return None
+        # 파일이 아직 없어도 mp4 폴더처럼 경로만 맞춰 둠
+        mp3_var.set(str(preferred))
+        return preferred if preferred.is_file() else None
 
     def set_busy(on: bool) -> None:
         busy["v"] = on
@@ -303,6 +368,8 @@ def main(*, container: tk.Misc | None = None) -> None:
                 w.state(["disabled"] if on else ["!disabled"])
         if not search_busy["v"] and not compose_busy["v"]:
             btn_search.state(["disabled"] if on else ["!disabled"])
+        if not on and not compose_busy["v"] and not search_busy["v"]:
+            apply_folder_merge_ui()
 
     def set_search_busy(on: bool) -> None:
         search_busy["v"] = on
@@ -329,7 +396,7 @@ def main(*, container: tk.Misc | None = None) -> None:
                 btn_play,
             ):
                 w.state(["!disabled"])
-
+            apply_folder_merge_ui()
     def set_compose_busy(on: bool) -> None:
         compose_busy["v"] = on
         btn_compose.state(["disabled"] if on else ["!disabled"])
@@ -350,6 +417,7 @@ def main(*, container: tk.Misc | None = None) -> None:
             ):
                 w.state(["!disabled"])
             btn_search.state(["!disabled"])
+            apply_folder_merge_ui()
 
     def mp4_dir() -> Path:
         p = Path(mp4_var.get().strip() or default_output_dir())
@@ -365,6 +433,8 @@ def main(*, container: tk.Misc | None = None) -> None:
     srt_ent.grid(row=0, column=1, sticky="ew", padx=(4, 6))
 
     def pick_srt() -> None:
+        if folder_merge_mode():
+            return
         init = Path(srt_var.get().strip()) if srt_var.get().strip() else Path.home()
         if init.is_file():
             init = init.parent
@@ -380,7 +450,8 @@ def main(*, container: tk.Misc | None = None) -> None:
         apply_media_paths_from_srt(force_mp3=True)
         persist()
 
-    ttk.Button(path_fr, text="찾기…", command=pick_srt).grid(row=0, column=2)
+    btn_pick_srt = ttk.Button(path_fr, text="찾기…", command=pick_srt)
+    btn_pick_srt.grid(row=0, column=2)
 
     ttk.Label(path_fr, text="MP4 폴더", width=8).grid(row=1, column=0, sticky="w", pady=(6, 0))
     mp4_ent = ttk.Entry(path_fr, textvariable=mp4_var)
@@ -394,6 +465,8 @@ def main(*, container: tk.Misc | None = None) -> None:
         touch_workspace_from_path(p)
         mp4_var.set(p)
         persist()
+        if folder_merge_mode():
+            load_merge_table()
 
     def view_mp4_folder() -> None:
         d = mp4_dir()
@@ -412,8 +485,10 @@ def main(*, container: tk.Misc | None = None) -> None:
         else:
             safe_messagebox(root, "showinfo", "7_3 mp4Search", f"MP4 폴더:\n{d}")
 
-    ttk.Button(path_fr, text="찾기…", command=pick_mp4_dir).grid(row=1, column=2, pady=(6, 0))
-    ttk.Button(path_fr, text="조회", command=view_mp4_folder).grid(row=1, column=3, padx=(4, 0), pady=(6, 0))
+    btn_pick_mp4 = ttk.Button(path_fr, text="찾기…", command=pick_mp4_dir)
+    btn_pick_mp4.grid(row=1, column=2, pady=(6, 0))
+    btn_view_mp4 = ttk.Button(path_fr, text="조회", command=view_mp4_folder)
+    btn_view_mp4.grid(row=1, column=3, padx=(4, 0), pady=(6, 0))
 
     ttk.Label(path_fr, text="다운로드", width=8).grid(row=2, column=0, sticky="w", pady=(6, 0))
     download_ent = ttk.Entry(path_fr, textvariable=download_var)
@@ -428,7 +503,8 @@ def main(*, container: tk.Misc | None = None) -> None:
         download_var.set(p)
         persist()
 
-    ttk.Button(path_fr, text="찾기…", command=pick_download_dir).grid(row=2, column=2, pady=(6, 0))
+    btn_pick_download = ttk.Button(path_fr, text="찾기…", command=pick_download_dir)
+    btn_pick_download.grid(row=2, column=2, pady=(6, 0))
 
     ttk.Label(path_fr, text="MP3", width=8).grid(row=3, column=0, sticky="w", pady=(6, 0))
     mp3_ent = ttk.Entry(path_fr, textvariable=mp3_var)
@@ -456,51 +532,87 @@ def main(*, container: tk.Misc | None = None) -> None:
         mp3_var.set(p)
         persist()
 
-    ttk.Button(path_fr, text="찾기…", command=pick_mp3).grid(row=3, column=2, pady=(6, 0))
+    btn_pick_mp3 = ttk.Button(path_fr, text="찾기…", command=pick_mp3)
+    btn_pick_mp3.grid(row=3, column=2, pady=(6, 0))
 
     chk_fr = ttk.Frame(path_fr)
     chk_fr.grid(row=4, column=1, sticky="ew", padx=(4, 0), pady=(6, 0))
-    ttk.Checkbutton(
+    chk_folder_merge = ttk.Checkbutton(
+        chk_fr,
+        text="MP4 병합",
+        variable=folder_merge_c,
+        command=lambda: on_folder_merge_toggle(),
+    )
+    chk_folder_merge.pack(side=tk.LEFT)
+    chk_burn_sub = ttk.Checkbutton(
         chk_fr,
         text="영상에 자막추가",
         variable=burn_sub_c,
         command=persist,
-    ).pack(side=tk.LEFT)
-    ttk.Checkbutton(
+    )
+    chk_burn_sub.pack(side=tk.LEFT, padx=(16, 0))
+    chk_add_announcer = ttk.Checkbutton(
         chk_fr,
         text="아나운서추가",
         variable=add_announcer_c,
         command=persist,
-    ).pack(side=tk.LEFT, padx=(16, 0))
-    announcer_cb = ttk.Combobox(
-        chk_fr,
-        textvariable=announcer_var,
-        values=_ann_names0,
-        width=22,
-        state="readonly" if _ann_names0 else "disabled",
     )
-    announcer_cb.pack(side=tk.LEFT, padx=(8, 0))
+    chk_add_announcer.pack(side=tk.LEFT, padx=(16, 0))
+
+    ttk.Label(path_fr, text="아나운서", width=8).grid(
+        row=5, column=0, sticky="w", pady=(6, 0)
+    )
+    announcer_ent = ttk.Entry(path_fr, textvariable=announcer_var)
+    announcer_ent.grid(row=5, column=1, sticky="ew", padx=(4, 6), pady=(6, 0))
+
+    def pick_announcer() -> None:
+        cur = announcer_var.get().strip()
+        init = Path(cur) if cur else Path.home()
+        if init.is_file():
+            init = init.parent
+        elif not init.is_dir():
+            ad = announcer_dir()
+            init = ad if ad is not None else Path.home()
+        p = filedialog.askopenfilename(
+            title="아나운서 MP4 (우측 하단 원형)",
+            initialdir=folder_dialog_initial(init),
+            filetypes=[("MP4", "*.mp4"), ("모든 파일", "*.*")],
+        )
+        if not p:
+            return
+        touch_workspace_from_path(p)
+        announcer_var.set(p)
+        persist()
+        status_var.set(f"아나운서: {Path(p).name}")
 
     def refresh_announcer_list() -> None:
         files = list_announcer_mp4s()
-        names = [p.name for p in files]
-        announcer_cb.configure(
-            values=names,
-            state="readonly" if names else "disabled",
-        )
         cur = announcer_var.get().strip()
-        if names and cur not in names:
-            announcer_var.set(names[0])
-        elif not names:
-            announcer_var.set("")
+        if cur and Path(cur).is_file():
+            status_var.set(f"아나운서: {Path(cur).name}")
+            persist()
+            return
+        if files:
+            announcer_var.set(str(files[0]))
+            ad = announcer_dir()
+            where = str(ad) if ad is not None else files[0].parent
+            status_var.set(f"아나운서 {len(files)}개 — {where}")
+        else:
+            status_var.set(
+                "아나운서 mp4 없음 — 「찾기…」로 파일을 선택하세요."
+            )
         persist()
 
-    ttk.Button(chk_fr, text="새로고침", width=8, command=refresh_announcer_list).pack(
-        side=tk.LEFT, padx=(6, 0)
+    btn_pick_announcer = ttk.Button(path_fr, text="찾기…", command=pick_announcer)
+    btn_pick_announcer.grid(row=5, column=2, pady=(6, 0))
+    btn_announcer_default = ttk.Button(
+        path_fr, text="기본", width=6, command=refresh_announcer_list
     )
-    announcer_cb.bind("<<ComboboxSelected>>", lambda _e: persist())
+    btn_announcer_default.grid(row=5, column=3, padx=(4, 0), pady=(6, 0))
 
     def _on_srt_path_set(_p: str) -> None:
+        if folder_merge_mode():
+            return
         apply_media_paths_from_srt(force_mp3=True)
         persist()
 
@@ -517,7 +629,7 @@ def main(*, container: tk.Misc | None = None) -> None:
         mp4_ent,
         mp4_var,
         mode="dir",
-        on_set=lambda _p: persist(),
+        on_set=lambda _p: (persist(), load_merge_table() if folder_merge_mode() else None),
     )
 
     bind_path_row_dnd(
@@ -533,6 +645,14 @@ def main(*, container: tk.Misc | None = None) -> None:
         mp3_var,
         mode="file",
         extensions=(".mp3",),
+        on_set=lambda _p: persist(),
+    )
+    bind_path_row_dnd(
+        path_fr,
+        announcer_ent,
+        announcer_var,
+        mode="file",
+        extensions=(".mp4",),
         on_set=lambda _p: persist(),
     )
 
@@ -555,7 +675,7 @@ def main(*, container: tk.Misc | None = None) -> None:
 
     usage_hint = ttk.Label(
         frm,
-        text="④ 합성 → all.mp4 (+ MP3 음성 · 자막 하단 번인) · SRT# · MP4재생(유지/반복) · MP4 열 드롭",
+        text="④ 합성 → all.mp4 (SRT 타임라인 또는 MP4 폴더만 병합) · MP3·자막·아나운서 · MP4재생·음소거",
     )
     usage_hint.grid(row=2, column=0, sticky="w", pady=(0, 4))
 
@@ -587,7 +707,7 @@ def main(*, container: tk.Misc | None = None) -> None:
     progress_fr.grid(row=4, column=0, sticky="ew", pady=(0, 4))
     progress_fr.grid_columnconfigure(1, weight=1)
     progress_text_var = tk.StringVar(value="")
-    ttk.Label(progress_fr, textvariable=progress_text_var, width=44).grid(row=0, column=0, sticky="w", padx=(0, 8))
+    ttk.Label(progress_fr, textvariable=progress_text_var, width=56).grid(row=0, column=0, sticky="w", padx=(0, 8))
     progress_var = tk.DoubleVar(value=0.0)
     progress_bar = ttk.Progressbar(progress_fr, variable=progress_var, maximum=100, mode="determinate", length=320)
     progress_bar.grid(row=0, column=1, sticky="ew")
@@ -639,6 +759,7 @@ def main(*, container: tk.Misc | None = None) -> None:
         "download_mp4",
         "mp4_file",
         "mp4_mode",
+        "mp4_mute",
         "png_file",
         "png_fx",
         "status",
@@ -652,6 +773,7 @@ def main(*, container: tk.Misc | None = None) -> None:
     tree.heading("download_mp4", text="다운로드파일")
     tree.heading("mp4_file", text="MP4")
     tree.heading("mp4_mode", text="MP4재생")
+    tree.heading("mp4_mute", text="음소거")
     tree.heading("png_file", text="PNG")
     tree.heading("png_fx", text="이미지효과")
     tree.heading("status", text="상태")
@@ -663,6 +785,7 @@ def main(*, container: tk.Misc | None = None) -> None:
     tree.column("download_mp4", width=100, anchor=tk.W, stretch=False)
     tree.column("mp4_file", width=80, anchor=tk.W, stretch=False)
     tree.column("mp4_mode", width=52, anchor=tk.CENTER, stretch=False)
+    tree.column("mp4_mute", width=56, anchor=tk.CENTER, stretch=False)
     tree.column("png_file", width=80, anchor=tk.W, stretch=False)
     tree.column("png_fx", width=72, anchor=tk.CENTER, stretch=False)
     tree.column("status", width=56, anchor=tk.CENTER, stretch=False)
@@ -1140,9 +1263,11 @@ def main(*, container: tk.Misc | None = None) -> None:
         return None
 
     def _sync_row_mp4_mode(row: CueRow) -> None:
-        n = _mp4_asset_number(row.mp4_path)
-        if n is not None:
-            row.mp4_play_mode = _mp4_mode_for_asset(n)
+        if row.mp4_path and row.mp4_path.is_file():
+            n = _mp4_asset_number(row.mp4_path)
+            if n is not None:
+                row.mp4_play_mode = _mp4_mode_for_asset(n)
+            row.mp4_mute = _mute_value_for_path(row.mp4_path)
 
     def refresh_tree_values(iid: str, *, status_override: str | None = None) -> None:
         row = rows.get(iid)
@@ -1168,6 +1293,7 @@ def main(*, container: tk.Misc | None = None) -> None:
         range_label = section_label(row)
         dl_disp = _download_mp4_display(row)[:80]
         mp4_mode_disp = mp4_play_mode_label(row.mp4_play_mode) if has_mp4 else ""
+        mp4_mute_disp = mp4_mute_label(row.mp4_mute) if has_mp4 else ""
         tree.item(
             iid,
             values=(
@@ -1179,6 +1305,7 @@ def main(*, container: tk.Misc | None = None) -> None:
                 dl_disp,
                 mp4_name,
                 mp4_mode_disp,
+                mp4_mute_disp,
                 png_name,
                 png_effect_label(row.png_effect),
                 status,
@@ -1330,7 +1457,117 @@ def main(*, container: tk.Misc | None = None) -> None:
     clip_start_ent.bind("<FocusOut>", on_clip_focus_out)
     clip_end_ent.bind("<FocusOut>", on_clip_focus_out)
 
+    def _set_path_widgets_state(widgets: list, *, enabled: bool) -> None:
+        st = ["!disabled"] if enabled else ["disabled"]
+        for w in widgets:
+            try:
+                w.state(st)
+            except tk.TclError:
+                pass
+
+    def apply_folder_merge_ui() -> None:
+        """MP4 병합 모드: MP4 폴더만 입력, 나머지 잠금."""
+        merge = folder_merge_mode()
+        _set_path_widgets_state(
+            [
+                srt_ent,
+                btn_pick_srt,
+                download_ent,
+                btn_pick_download,
+                mp3_ent,
+                btn_pick_mp3,
+                chk_burn_sub,
+                chk_add_announcer,
+                announcer_ent,
+                btn_pick_announcer,
+                btn_announcer_default,
+                btn_load,
+                btn_search,
+                btn_apply,
+                btn_optimize_img,
+                btn_zoom_fx,
+                btn_reset_fx,
+                keyword_ent,
+            ],
+            enabled=not merge,
+        )
+        _set_path_widgets_state(
+            [mp4_ent, btn_pick_mp4, btn_view_mp4, chk_folder_merge, btn_compose, btn_play],
+            enabled=True,
+        )
+        if merge:
+            usage_hint.configure(
+                text="MP4 병합 모드 — MP4 폴더만 사용 · 목록에서 음소거 선택 후 ④ 병합"
+            )
+            btn_compose.configure(text="④ 병합 (all.mp4)")
+        else:
+            usage_hint.configure(
+                text="④ 합성 → all.mp4 (SRT 타임라인 또는 MP4 폴더만 병합) · MP3·자막·아나운서 · MP4재생·음소거"
+            )
+            btn_compose.configure(text="④ 합성 (MP4+PNG)")
+
+    def load_merge_table() -> None:
+        """MP4 폴더 파일을 순서대로 그리드에 표시 (음소거 선택용)."""
+        out_dir = mp4_dir()
+        clips = list_folder_mp4s_for_merge(out_dir)
+        tree.delete(*tree.get_children())
+        rows.clear()
+        clear_results_panel()
+        if not clips:
+            status_var.set(f"병합할 MP4 없음 — {out_dir}")
+            safe_messagebox(
+                root,
+                "showwarning",
+                "7_3 mp4Search",
+                f"MP4 폴더에 병합할 .mp4 가 없습니다.\n\n{out_dir}",
+            )
+            return
+        for i, path in enumerate(clips, 1):
+            mute = _mute_value_for_path(path)
+            iid = tree.insert(
+                "",
+                tk.END,
+                values=(i, "", "", path.name, "", "", path.name, "", "", "", "", ""),
+            )
+            rows[iid] = CueRow(
+                srt_id=i,
+                cue_text=path.name,
+                time_start="",
+                time_end="",
+                cue_duration_sec=0.0,
+                timeline_start_sec=float(i - 1),
+                timeline_end_sec=float(i),
+                mp4_path=path,
+                mp4_play_mode=MP4_MODE_LOOP,
+                mp4_mute=mute,
+                preview_path=path,
+            )
+            refresh_tree_values(iid)
+        muted_n = sum(1 for r in rows.values() if is_mp4_muted(r.mp4_mute))
+        status_var.set(
+            f"MP4 병합 목록 {len(clips)}개 · 음소거 {muted_n} — {out_dir.name}"
+        )
+        query_var.set(
+            f"병합 순서 — {' → '.join(p.name for p in clips[:8])}"
+            + (" …" if len(clips) > 8 else "")
+        )
+
+    def on_folder_merge_toggle() -> None:
+        persist()
+        apply_folder_merge_ui()
+        if folder_merge_mode():
+            load_merge_table()
+        else:
+            tree.delete(*tree.get_children())
+            rows.clear()
+            clear_results_panel()
+            status_var.set("SRT 모드 — 「① 목록 조회」로 자막을 불러오세요.")
+            query_var.set("")
+
     def load_table() -> None:
+        if folder_merge_mode():
+            load_merge_table()
+            return
         suggest_mp3_from_srt()
         srt = Path(srt_var.get().strip())
         if not srt.is_file():
@@ -1363,12 +1600,16 @@ def main(*, container: tk.Misc | None = None) -> None:
                 )
                 cue_one = (text or "").strip().replace("\n", " ")
                 dur = max(0.0, (en_ms - st_ms) / 1000.0)
-                iid = tree.insert("", tk.END, values=(srt_id, "", "", cue_one, "", "", "", "", "", "고정", ""))
+                iid = tree.insert(
+                    "", tk.END, values=(srt_id, "", "", cue_one, "", "", "", "", "", "", "고정", "")
+                )
                 mp4_mode = MP4_MODE_LOOP
+                mp4_mute = MP4_MUTE_OFF
                 if mp4_path and mp4_path.is_file():
                     n = parse_srt_asset_number(mp4_path.name)
                     if n is not None:
                         mp4_mode = _mp4_mode_for_asset(n)
+                        mp4_mute = _mp4_mute_for_asset(n)
                 rows[iid] = CueRow(
                     srt_id=srt_id,
                     cue_text=cue_one,
@@ -1382,6 +1623,7 @@ def main(*, container: tk.Misc | None = None) -> None:
                     cue_ids=[srt_id],
                     mp4_path=mp4_path,
                     mp4_play_mode=mp4_mode,
+                    mp4_mute=mp4_mute,
                     png_path=png_path,
                     preview_path=mp4_path if mp4_path and mp4_path.is_file() else None,
                 )
@@ -1998,6 +2240,12 @@ def main(*, container: tk.Misc | None = None) -> None:
                         _set_mp4_mode_for_asset(n, mode)
                     else:
                         refresh_tree_values(iid)
+                elif col_id == _COL_MP4_MUTE:
+                    if row.mp4_path and row.mp4_path.is_file():
+                        mute = normalize_mp4_mute(MP4_MUTE_BY_LABEL.get(val, val))
+                        _set_mute_for_path(row.mp4_path, mute)
+                    else:
+                        refresh_tree_values(iid)
             except tk.TclError:
                 pass
         try:
@@ -2013,7 +2261,13 @@ def main(*, container: tk.Misc | None = None) -> None:
         row = rows.get(iid)
         if not row:
             return
-        if col_id not in (_COL_KEYWORD, _COL_DOWNLOAD, _COL_PNG_FX, _COL_MP4_MODE):
+        if col_id not in (
+            _COL_KEYWORD,
+            _COL_DOWNLOAD,
+            _COL_PNG_FX,
+            _COL_MP4_MODE,
+            _COL_MP4_MUTE,
+        ):
             return
         if _cell_editor is not None and _edit_iid == iid and _edit_col == col_id:
             try:
@@ -2077,6 +2331,31 @@ def main(*, container: tk.Misc | None = None) -> None:
             cb.bind("<<ComboboxSelected>>", lambda _e: commit_mode())
             cb.bind("<Escape>", lambda _e: cancel_mode())
             cb.bind("<FocusOut>", lambda _e: commit_mode())
+            return
+
+        if col_id == _COL_MP4_MUTE:
+            if not row.mp4_path or not row.mp4_path.is_file():
+                return
+            cb = ttk.Combobox(
+                tree,
+                values=list(MP4_MUTE_LABELS_LIST),
+                state="readonly",
+                width=max(4, w // 10),
+            )
+            _cell_editor = cb
+            cb.place(x=x, y=y, width=max(w, 56), height=h)
+            cb.set(mp4_mute_label(row.mp4_mute))
+
+            def commit_mute() -> None:
+                _close_cell_editor(save=True)
+
+            def cancel_mute() -> None:
+                _close_cell_editor(save=False)
+
+            cb.focus_set()
+            cb.bind("<<ComboboxSelected>>", lambda _e: commit_mute())
+            cb.bind("<Escape>", lambda _e: cancel_mute())
+            cb.bind("<FocusOut>", lambda _e: commit_mute())
             return
 
         ent = ttk.Entry(tree)
@@ -2145,7 +2424,18 @@ def main(*, container: tk.Misc | None = None) -> None:
     def on_tree_cell_click(event: tk.Event) -> None:
         """편집 가능 셀 — 한 번 클릭으로 입력 (pngFileName 셀 편집과 동일)."""
         iid, col_id = _tree_col_id_at(event)
-        if not iid or col_id not in (_COL_KEYWORD, _COL_DOWNLOAD, _COL_PNG_FX, _COL_MP4_MODE):
+        editable = (
+            (_COL_MP4_MUTE,)
+            if folder_merge_mode()
+            else (
+                _COL_KEYWORD,
+                _COL_DOWNLOAD,
+                _COL_PNG_FX,
+                _COL_MP4_MODE,
+                _COL_MP4_MUTE,
+            )
+        )
+        if not iid or col_id not in editable:
             return
         tree.selection_set(iid)
         tree.focus(iid)
@@ -2153,14 +2443,31 @@ def main(*, container: tk.Misc | None = None) -> None:
 
     def on_tree_double_click(event: tk.Event) -> None:
         if tree.identify_region(event.x, event.y) != "cell":
-            run_search()
+            if not folder_merge_mode():
+                run_search()
             return
         iid, col_id = _tree_col_id_at(event)
         if not iid:
             return
-        if col_id in (_COL_KEYWORD, _COL_DOWNLOAD, _COL_PNG_FX, _COL_MP4_MODE):
+        editable = (
+            (_COL_MP4_MUTE,)
+            if folder_merge_mode()
+            else (
+                _COL_KEYWORD,
+                _COL_DOWNLOAD,
+                _COL_PNG_FX,
+                _COL_MP4_MODE,
+                _COL_MP4_MUTE,
+            )
+        )
+        if col_id in editable:
             tree.selection_set(iid)
             _start_cell_edit(iid, col_id)
+            return
+        if folder_merge_mode():
+            row = rows.get(iid)
+            if row and row.mp4_path and row.mp4_path.is_file():
+                play_media(row.mp4_path)
             return
         run_search()
 
@@ -2401,11 +2708,18 @@ def main(*, container: tk.Misc | None = None) -> None:
 
     def _compose_progress_label(pct: float, mark_sec: float | None, idx: int, total: int) -> str:
         pct_i = int(pct)
+        head = "병합" if folder_merge_mode() else "합성"
         if idx == -1:
-            return f"합성 {pct_i}% — MP3 음성 — {ALL_MP4_NAME}"
+            return f"{head} {pct_i}% — MP3 음성 — {ALL_MP4_NAME}"
+        if mark_sec == -1.0:
+            return f"{head} {pct_i}% — 음소거 ({idx}/{total}) — {ALL_MP4_NAME}"
+        if mark_sec == -2.0:
+            return f"{head} {pct_i}% — 준비 ({idx}/{total}) — {ALL_MP4_NAME}"
         if mark_sec is None:
-            return f"합성 {pct_i}% — 연결 — {ALL_MP4_NAME}"
-        return f"합성 {pct_i}% — {mark_sec:g}초 ({idx}/{total}) — {ALL_MP4_NAME}"
+            if total > 0 and folder_merge_mode():
+                return f"{head} {pct_i}% — 연결 ({total}개) — {ALL_MP4_NAME}"
+            return f"{head} {pct_i}% — 연결 — {ALL_MP4_NAME}"
+        return f"{head} {pct_i}% — {mark_sec:g}초 ({idx}/{total}) — {ALL_MP4_NAME}"
 
     def _sync_row_assets_from_folder(out_dir: Path) -> None:
         srt = Path(srt_var.get().strip())
@@ -2484,13 +2798,220 @@ def main(*, container: tk.Misc | None = None) -> None:
 
         threading.Thread(target=work, daemon=True).start()
 
+    def run_compose_folder_only() -> None:
+        """MP4 폴더의 mp4를 이어 붙여 all.mp4 (병합 모드·폴더만)."""
+        out_dir = mp4_dir()
+        if folder_merge_mode() and rows:
+            clips = [
+                r.mp4_path
+                for r in sorted(rows.values(), key=lambda x: x.srt_id)
+                if r.mp4_path and r.mp4_path.is_file()
+            ]
+        else:
+            clips = list_folder_mp4s_for_merge(out_dir)
+        if not clips:
+            safe_messagebox(
+                root,
+                "showwarning",
+                "7_3 mp4Search",
+                "병합할 MP4가 없습니다.\n\n"
+                "MP4 폴더에 .mp4 파일을 두거나,\n"
+                "「MP4 병합」을 켠 뒤 목록을 확인하세요.",
+            )
+            return
+        merge_only = folder_merge_mode()
+        mp3_path: Path | None = None
+        if not merge_only:
+            suggest_mp3_from_srt()
+            mp3_path = Path(mp3_var.get().strip()) if mp3_var.get().strip() else None
+            if mp3_path and not mp3_path.is_file():
+                safe_messagebox(
+                    root, "showwarning", "7_3 mp4Search", f"MP3 파일을 찾을 수 없습니다.\n{mp3_path}"
+                )
+                return
+        mute_names = {
+            r.mp4_path.name.lower()
+            for r in rows.values()
+            if r.mp4_path and r.mp4_path.is_file() and is_mp4_muted(r.mp4_mute)
+        }
+        if not mute_names and not merge_only:
+            # 그리드 없이 폴더만 병합할 때 파일명 음소거 설정 반영
+            for c in clips:
+                if is_mp4_muted(_mute_value_for_path(c)):
+                    mute_names.add(c.name.lower())
+        preview = "\n".join(
+            f"  · {p.name}" + (" (음소거)" if p.name.lower() in mute_names else "")
+            for p in clips[:12]
+        )
+        if len(clips) > 12:
+            preview += f"\n  … 외 {len(clips) - 12}개"
+        mp3_warn = ""
+        if mp3_path and mp3_path.is_file():
+            mp3_dur = _probe_media_duration(mp3_path) or 0.0
+            vid_est = 0.0
+            for c in clips:
+                d = _probe_media_duration(c)
+                if d:
+                    vid_est += d
+            if mp3_dur > 0.5 and vid_est > 0.5 and mp3_dur + 30.0 < vid_est * 0.85:
+                mp3_warn = (
+                    f"\n\n⚠ MP3({mp3_dur/60:.1f}분)가 영상 합({vid_est/60:.1f}분)보다 짧습니다.\n"
+                    f"앞부분만 음성이 나오고 이후는 무음입니다.\n"
+                    f"회차별 all.mp3 가 맞는지 확인하세요."
+                )
+        audio_warn = merge_audio_mismatch_hint(clips)
+        mute_hint = f"\n음소거 {len(mute_names)}개" if mute_names else ""
+        try:
+            proceed = messagebox.askyesno(
+                "7_3 mp4Search",
+                f"MP4 폴더의 {len(clips)}개 파일을 순서대로 병합합니다.\n"
+                f"→ {ALL_MP4_NAME}{mute_hint}\n\n{preview}{audio_warn}{mp3_warn}\n\n병합할까요?",
+                parent=root,
+            )
+        except tk.TclError:
+            proceed = False
+        if not proceed:
+            return
+        compose_cancel.clear()
+        set_compose_busy(True)
+        progress_var.set(0.0)
+        progress_text_var.set("병합 0%")
+        dest = out_dir / ALL_MP4_NAME
+        work_dir = out_dir / "_compose_work"
+        mp3_hint = f" + {mp3_path.name}" if mp3_path else ""
+        status_var.set(f"폴더 병합 시작… {ALL_MP4_NAME}{mp3_hint} ({len(clips)}개)")
+        clear_compose_log()
+        append_compose_log(
+            f"[폴더 병합] {out_dir}\n파일 {len(clips)}개 → {ALL_MP4_NAME}"
+            + (f"\n음소거: {', '.join(sorted(mute_names))}" if mute_names else "")
+        )
+
+        def work() -> None:
+            stopped = False
+            result_path: Path | None = None
+
+            def set_compose_progress(overall: float, label: str) -> None:
+                progress_var.set(min(100.0, max(0.0, overall)))
+                progress_text_var.set(label)
+
+            def on_overall(pct: float, mark_sec: float | None, idx: int, job_total: int) -> None:
+                label = _compose_progress_label(pct, mark_sec, idx, job_total)
+                saving = compose_cancel.is_set()
+
+                def ui(p: float = pct, lb: str = label, save: bool = saving) -> None:
+                    set_compose_progress(p, lb)
+                    if save:
+                        status_var.set(f"합성 중지… (저장 중) {int(p)}%")
+
+                safe_after(root, ui)
+
+            def on_log(msg: str) -> None:
+                safe_after(root, lambda m=msg: append_compose_log(m))
+
+            try:
+                try:
+                    ann_sel = None
+                    add_ann = False
+                    if not merge_only:
+                        ann_sel = resolve_announcer_mp4(announcer_var.get().strip())
+                        add_ann = bool(add_announcer_c.get())
+                    result_path = compose_folder_mp4s_to_all_mp4(
+                        clips,
+                        dest,
+                        work_dir,
+                        audio_mp3=mp3_path,
+                        add_announcer=add_ann,
+                        announcer_mp4=ann_sel,
+                        mute_names=mute_names,
+                        cancel_event=compose_cancel,
+                        on_progress=on_overall,
+                        on_log=on_log,
+                    )
+                except ComposeStopped as e:
+                    stopped = True
+                    result_path = e.path if e.path and e.path.is_file() else None
+                    if result_path is None and dest.is_file():
+                        result_path = dest
+                out_file = result_path or dest
+                was_stopped = stopped
+
+                def ui_done() -> None:
+                    set_compose_busy(False)
+                    if was_stopped:
+                        if out_file.is_file():
+                            set_compose_progress(100.0, f"병합 중지 — {ALL_MP4_NAME}")
+                            status_var.set(f"병합 중지 — {ALL_MP4_NAME}")
+                            append_compose_log(f"\n[중지] 저장: {out_file}")
+                            safe_messagebox(
+                                root,
+                                "showinfo",
+                                "7_3 mp4Search",
+                                f"병합을 중지했습니다.\n\n저장: {out_file}\n\n{out_dir}",
+                            )
+                        else:
+                            progress_var.set(0.0)
+                            progress_text_var.set("")
+                            safe_messagebox(root, "showwarning", "7_3 mp4Search", "병합이 중지되었습니다.")
+                    elif out_file.is_file():
+                        set_compose_progress(100.0, f"병합 완료 100% — {ALL_MP4_NAME}")
+                        status_var.set(f"폴더 병합 완료 — {ALL_MP4_NAME}")
+                        append_compose_log(f"\n[완료] {out_file}")
+                        names = "\n".join(p.name for p in clips[:8])
+                        extra = f"\n… 외 {len(clips) - 8}개" if len(clips) > 8 else ""
+                        safe_messagebox(
+                            root,
+                            "showinfo",
+                            "7_3 mp4Search",
+                            f"폴더 MP4 병합 완료\n\n{out_file}\n\n"
+                            f"[병합 파일] {len(clips)}개\n{names}{extra}",
+                        )
+                        # 완료 문구 유지 (메시지 박스 후에도 100% 보이게)
+                        set_compose_progress(100.0, f"병합 완료 100% — {ALL_MP4_NAME}")
+                    else:
+                        progress_var.set(0.0)
+                        progress_text_var.set("병합 실패")
+                        safe_messagebox(root, "showerror", "7_3 mp4Search", "all.mp4 생성에 실패했습니다.")
+
+                safe_after(root, ui_done)
+            except Exception as e:
+                tb = traceback.format_exc()
+
+                def ui_err() -> None:
+                    set_compose_busy(False)
+                    progress_var.set(0.0)
+                    progress_text_var.set("병합 실패")
+                    append_compose_log(f"\n[합성 오류]\n{e}\n{tb}")
+                    safe_messagebox(root, "showerror", "7_3 mp4Search", f"폴더 병합 실패:\n{e}")
+
+                safe_after(root, ui_err)
+            finally:
+                def ui_fin() -> None:
+                    if compose_busy["v"]:
+                        set_compose_busy(False)
+
+                safe_after(root, ui_fin)
+
+        threading.Thread(target=work, daemon=True).start()
+
     def run_compose() -> None:
         if compose_busy["v"]:
             return
+        if folder_merge_mode():
+            if not rows:
+                load_merge_table()
+            run_compose_folder_only()
+            return
         if not rows:
-            safe_messagebox(root, "showwarning", "7_3 mp4Search", "먼저 「① 목록 조회」로 SRT 구간을 불러오세요.")
+            run_compose_folder_only()
             return
         out_dir = mp4_dir()
+        extra_mp4, extra_png = _row_asset_maps()
+        folder_mp4, folder_png = scan_srt_assets(out_dir)
+        # SRT_NNN 자산이 없고 일반 mp4만 있으면 폴더 병합 (예: 1부.mp4 …)
+        if not folder_mp4 and not folder_png and not extra_mp4 and not extra_png:
+            if list_folder_mp4s_for_merge(out_dir):
+                run_compose_folder_only()
+                return
         segments = _timeline_segments()
         cue_ends = [row.timeline_end_sec for row in rows.values() if row.timeline_end_sec > 0]
         suggest_mp3_from_srt()
@@ -2499,11 +3020,11 @@ def main(*, container: tk.Misc | None = None) -> None:
             safe_messagebox(root, "showwarning", "7_3 mp4Search", f"MP3 파일을 찾을 수 없습니다.\n{mp3_path}")
             return
         mp3_dur = _probe_media_duration(mp3_path) if mp3_path else None
-        extra_mp4, extra_png = _row_asset_maps()
         extra_fx = _row_png_effects()
         extra_modes = _row_mp4_play_modes()
         asset_times = _asset_start_times()
-        mp4_map, png_map = scan_srt_assets(out_dir)
+        mp4_map = dict(folder_mp4)
+        png_map = dict(folder_png)
         mp4_map.update(extra_mp4)
         png_map.update(extra_png)
         mismatched = [
@@ -2567,6 +3088,9 @@ def main(*, container: tk.Misc | None = None) -> None:
             asset_start_times=asset_times,
         )
         if not jobs:
+            if list_folder_mp4s_for_merge(out_dir):
+                run_compose_folder_only()
+                return
             safe_messagebox(
                 root,
                 "showwarning",
@@ -2732,7 +3256,7 @@ def main(*, container: tk.Misc | None = None) -> None:
                             progress_text_var.set("")
                             safe_messagebox(root, "showwarning", "7_3 mp4Search", "합성이 중지되었습니다.")
                     elif out_file.is_file():
-                        set_compose_progress(100.0, "합성 100%")
+                        set_compose_progress(100.0, f"합성 완료 100% — {ALL_MP4_NAME}")
                         status_var.set(f"합성 완료 — {ALL_MP4_NAME}")
                         _apply_compose_statuses(compose_statuses)
                         summary = format_jobs_timeline_summary(compose_jobs)
@@ -2766,9 +3290,9 @@ def main(*, container: tk.Misc | None = None) -> None:
                         )
                     else:
                         progress_var.set(0.0)
-                        progress_text_var.set("")
+                        progress_text_var.set("합성 실패")
                         safe_messagebox(root, "showerror", "7_3 mp4Search", "all.mp4 생성에 실패했습니다.")
-                    progress_text_var.set("")
+                    # 성공 시 100% 문구 유지
 
                 safe_after(root, ui_done)
             except Exception as e:
@@ -2776,7 +3300,7 @@ def main(*, container: tk.Misc | None = None) -> None:
                 def fail() -> None:
                     set_compose_busy(False)
                     progress_var.set(0.0)
-                    progress_text_var.set("")
+                    progress_text_var.set("합성 실패")
                     append_compose_log(f"\n[합성 오류]\n{e}")
                     safe_messagebox(root, "showerror", "7_3 mp4Search", str(e))
 
@@ -2827,7 +3351,10 @@ def main(*, container: tk.Misc | None = None) -> None:
     else:
         bind_hub_destroy(root, on_close)
 
-    if srt_var.get().strip() and Path(srt_var.get().strip()).is_file():
+    apply_folder_merge_ui()
+    if folder_merge_mode():
+        root.after(300, load_merge_table)
+    elif srt_var.get().strip() and Path(srt_var.get().strip()).is_file():
         suggest_mp3_from_srt()
         root.after(300, load_table)
 

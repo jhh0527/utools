@@ -6,28 +6,96 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from wisdom_workspace import workspace_module_output
+from wisdom_workspace import get_workspace_dir, workspace_module_output
 
 MODULE = "7_3_mp4Search"
 
-# 우측 하단 원형 아나운서 PiP — C:\무협극장\anouncer\*.mp4
-ANNOUNCER_DIR = Path(r"C:\무협극장\anouncer")
-# 레거시 단일 파일 (폴더에 없을 때 폴백)
-DEFAULT_ANNOUNCER_MP4 = Path(r"C:\무협극장\middleageAnouncer.mp4")
+# 우측 하단 원형 아나운서 PiP — ``…/무협극장/anouncer/*.mp4``
+_LEGACY_ANNOUNCER_DIR = Path(r"C:\무협극장\anouncer")
+_LEGACY_ANNOUNCER_MP4 = Path(r"C:\무협극장\middleageAnouncer.mp4")
+
+
+def announcer_search_dirs() -> list[Path]:
+    """아나운서 mp4 후보 폴더 (앞쪽 우선)."""
+    out: list[Path] = []
+    seen: set[str] = set()
+
+    def add(p: Path | None) -> None:
+        if p is None:
+            return
+        try:
+            key = str(p.expanduser().resolve())
+        except OSError:
+            key = str(p)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(Path(key))
+
+    ws = get_workspace_dir()
+    if ws is not None:
+        add(ws / "anouncer")
+        # 작업폴더가 장/부 하위여도 상위의 anouncer 탐색
+        for parent in (ws, *ws.parents):
+            add(parent / "anouncer")
+            if parent.name == "무협극장" or parent.parent == parent:
+                break
+            # 너무 위로 올라가지 않음
+            if len(parent.parts) <= 2:
+                break
+
+    try:
+        from wisdom_root import resolve_wisdom_root
+
+        root = resolve_wisdom_root()
+        add(root / "무협극장" / "anouncer")
+        add(root / "anouncer")
+    except ImportError:
+        pass
+
+    add(_LEGACY_ANNOUNCER_DIR)
+    return out
+
+
+def announcer_dir() -> Path | None:
+    """mp4가 있는 첫 anouncer 폴더."""
+    for d in announcer_search_dirs():
+        if d.is_dir() and any(d.glob("*.mp4")):
+            return d
+    for d in announcer_search_dirs():
+        if d.is_dir():
+            return d
+    return None
+
+
+# 하위 호환: 예전 상수명 (실제 경로는 announcer_dir() 사용)
+ANNOUNCER_DIR = _LEGACY_ANNOUNCER_DIR
+DEFAULT_ANNOUNCER_MP4 = _LEGACY_ANNOUNCER_MP4
 
 
 def list_announcer_mp4s() -> list[Path]:
-    """``ANNOUNCER_DIR`` 아래 *.mp4 (이름순). 없으면 레거시 단일 파일."""
-    out: list[Path] = []
-    if ANNOUNCER_DIR.is_dir():
-        out = sorted(
-            (p for p in ANNOUNCER_DIR.glob("*.mp4") if p.is_file()),
+    """anouncer 폴더의 *.mp4 (이름순). 없으면 레거시 단일 파일."""
+    for d in announcer_search_dirs():
+        if not d.is_dir():
+            continue
+        files = sorted(
+            (p for p in d.glob("*.mp4") if p.is_file()),
             key=lambda p: p.name.lower(),
         )
-    if out:
-        return out
-    if DEFAULT_ANNOUNCER_MP4.is_file():
-        return [DEFAULT_ANNOUNCER_MP4]
+        if files:
+            return files
+    if _LEGACY_ANNOUNCER_MP4.is_file():
+        return [_LEGACY_ANNOUNCER_MP4]
+    # wisdom 쪽 middleage 폴백
+    try:
+        from wisdom_root import resolve_wisdom_root
+
+        for name in ("middleageAnouncer.mp4", "jwhShirt.mp4"):
+            p = resolve_wisdom_root() / "무협극장" / "anouncer" / name
+            if p.is_file():
+                return [p]
+    except ImportError:
+        pass
     return []
 
 
@@ -39,12 +107,14 @@ def resolve_announcer_mp4(name_or_path: str = "") -> Path | None:
         p = Path(raw)
         if p.is_file():
             return p
-        # 파일명만 저장된 경우
-        cand = ANNOUNCER_DIR / Path(raw).name
-        if cand.is_file():
-            return cand
+        # 파일명만 저장된 경우 — 후보 폴더·목록에서 검색
+        name = Path(raw).name
+        for d in announcer_search_dirs():
+            cand = d / name
+            if cand.is_file():
+                return cand
         for f in files:
-            if f.name.lower() == Path(raw).name.lower():
+            if f.name.lower() == name.lower():
                 return f
     return files[0] if files else None
 

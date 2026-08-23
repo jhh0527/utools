@@ -8,10 +8,9 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules
 specdir = os.path.dirname(os.path.abspath(SPEC))
 wisdom_repo = os.path.normpath(os.path.join(specdir, ".."))
 _module_dirs = (
-    "1_1_textTo700Text",
     "2_1_ttsToVoice",
     "2_2_imgDown",
-    "2_3_sceneImage",
+    "2_5_sceneImage",
     "3_1_pngFileName",
     "3_2_pngToJpg",
     "4_2_ShortVideo",
@@ -35,8 +34,6 @@ _wisdom_scripts = [
     os.path.join(wisdom_repo, "wisdom_hub", "pipeline.py"),
     os.path.join(wisdom_repo, "wisdom_hub", "loaders.py"),
     os.path.join(wisdom_repo, "wisdom_hub", "gui_app.py"),
-    os.path.join(wisdom_repo, "1_1_textTo700Text", "manuscript_700_splitter.py"),
-    os.path.join(wisdom_repo, "1_1_textTo700Text", "genspark_chat.py"),
 ]
 _pw_datas, _pw_binaries, _pw_hidden = collect_all("playwright")
 _fw_datas, _fw_binaries, _fw_hidden = collect_all("faster_whisper")
@@ -77,8 +74,6 @@ hiddenimports: list[str] = [
     "wisdom_content_paths",
     "wisdom_gui_host",
     "windnd",
-    "manuscript_700_splitter",
-    "genspark_chat",
     "browser_cookie3",
     "playwright",
     "playwright.async_api",

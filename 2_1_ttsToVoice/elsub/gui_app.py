@@ -5,7 +5,7 @@
 - 파트·`all.mp3` 병합은 ffmpeg concat + libmp3lame 재인코딩(128k/44.1kHz/mono) 우선, 실패 시 바이너리 폴백입니다.
 - 통합 `all.*` 파일은 **별도 버튼**으로 출력 폴더의 기존 `part*.` 파일만 읽어 생성합니다.
 - 출력 폴더는 GUI에서 지정합니다 (기본 ``2_1_ttsToVoice/output/``).
-- 입력은 붙여넣기 또는 **입력 폴더**의 ``*.txt`` (기본 ``1_2_textToTts/output/``).
+- 입력은 붙여넣기 또는 **입력 폴더**의 ``*.txt`` (기본 ``1_2_textToJson/output/``).
 - 자막 구간 길이는 세그먼트 MP3를 ffprobe 한 값을 사용하고, 파트 전체 길이에 맞게 미세 보정합니다.
 - 문장부호로 끝나지 않은 줄은 다음 줄 TTS를 쉼 없이 붙여 한 API로 이어 읽습니다.
 - ``[breathes]``·``[short pause]`` 등은 ElevenLabs SSML ``<break>`` 로 변환해 호흡·쉼을 넣습니다.

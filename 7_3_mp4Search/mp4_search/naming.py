@@ -8,6 +8,10 @@ from pathlib import Path
 
 _SRT_STEM = re.compile(r"^srt[-_]?0*(\d+)\.mp4$", re.IGNORECASE)
 _SRT_ASSET = re.compile(r"^srt[-_]?0*(\d+)\.(mp4|png|jpe?g|webp|gif)$", re.IGNORECASE)
+_LEADING_NUM = re.compile(r"^(\d+)")
+# ``01장4`` · ``1장2`` — 부분/중단 산출물 (본편 ``1장.mp4`` 와 별개)
+_CHAPTER_PART_STEM = re.compile(r"^(\d+)장(\d+)$")
+_CHAPTER_ONLY_STEM = re.compile(r"^(\d+)장$")
 _IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif"})
 ALL_MP4_NAME = "all.mp4"
 # 썸네일 전용 — 타임라인 합성·마크·길이 계산에서 제외
@@ -76,6 +80,77 @@ def scan_srt_assets(folder: Path) -> tuple[dict[int, Path], dict[int, Path]]:
         elif ext in _IMAGE_EXTS:
             png_map[num] = child
     return mp4_map, png_map
+
+
+def list_folder_mp4s_for_merge(folder: Path) -> list[Path]:
+    """폴더 직속 ``.mp4`` 목록 — ``all.mp4``·임시·``_`` 접두·부분본(``01장4``) 제외.
+
+    같은 회차(``01장``·``1장``)가 여러 개면 용량이 큰 본편만 남긴다.
+    정렬: ``SRT_NNN`` 번호 → 파일명 앞 숫자(``1부``·``10부``) → 이름.
+    """
+    folder = Path(folder)
+    if not folder.is_dir():
+        return []
+    try:
+        children = list(folder.iterdir())
+    except OSError:
+        return []
+    skip_names = {ALL_MP4_NAME.lower()}
+    out: list[Path] = []
+    for child in children:
+        if not child.is_file():
+            continue
+        if child.suffix.lower() != ".mp4":
+            continue
+        name_l = child.name.lower()
+        if name_l in skip_names:
+            continue
+        if name_l.startswith("_"):
+            continue
+        if ".tmp." in name_l or name_l.endswith(".tmp.mp4"):
+            continue
+        if ".concat." in name_l:
+            continue
+        # ``01장4.mp4`` 등 — 중단·부분 합성이 본편 병합에 섞이면 끝 고정·무음 유발
+        if _CHAPTER_PART_STEM.match(child.stem):
+            continue
+        out.append(child)
+
+    # ``01장.mp4`` + ``1장.mp4`` 처럼 동일 회차 중복 → 큰 파일만
+    chapter_best: dict[int, Path] = {}
+    rest: list[Path] = []
+    for p in out:
+        m = _CHAPTER_ONLY_STEM.match(p.stem)
+        if not m:
+            rest.append(p)
+            continue
+        key = int(m.group(1))
+        prev = chapter_best.get(key)
+        try:
+            sz = p.stat().st_size
+        except OSError:
+            sz = 0
+        if prev is None:
+            chapter_best[key] = p
+            continue
+        try:
+            prev_sz = prev.stat().st_size
+        except OSError:
+            prev_sz = 0
+        if sz >= prev_sz:
+            chapter_best[key] = p
+    out = rest + list(chapter_best.values())
+
+    def sort_key(p: Path) -> tuple[int, int, str]:
+        n = parse_srt_asset_number(p.name)
+        if n is not None:
+            return (0, int(n), p.name.lower())
+        m = _LEADING_NUM.match(p.stem)
+        if m:
+            return (1, int(m.group(1)), p.name.lower())
+        return (2, 0, p.name.lower())
+
+    return sorted(out, key=sort_key)
 
 
 def list_compose_pairs(folder: Path) -> list[tuple[int, Path, Path]]:

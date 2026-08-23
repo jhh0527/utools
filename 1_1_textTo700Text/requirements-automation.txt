@@ -1,2 +1,0 @@
-# Genspark 채팅 검색어 조회 (선택)
-playwright>=1.40

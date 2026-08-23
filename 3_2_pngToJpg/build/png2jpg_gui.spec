@@ -30,6 +30,7 @@ a = Analysis(
         "png2jpg.naming",
         "png2jpg.paths",
         "png2jpg.settings",
+        "png2jpg.mp4_copy",
         "wisdom_root",
         "wisdom_bootstrap",
         "wisdom_workspace",

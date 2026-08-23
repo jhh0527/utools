@@ -73,3 +73,11 @@ def default_input_dir() -> Path:
     if inp.is_dir():
         return inp
     return _project_root() / "input"
+
+
+def resolve_mp4_dir(from_path: Path | str) -> Path:
+    """``jpg``/``png`` 폴더면 형제 ``mp4``, 아니면 상위 ``mp4``."""
+    p = Path(from_path).expanduser().resolve()
+    if p.name.lower() in ("jpg", "jpeg", "png"):
+        return p.parent / "mp4"
+    return p.parent / "mp4"
