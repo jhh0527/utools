@@ -18,6 +18,7 @@ _module_dirs = (
     "7_utube",
     "7_2_mp4Edit",
     "7_3_mp4Search",
+    "7_4_mp4Merge",
     "9_mdFile",
 )
 _pathex = [wisdom_repo] + [
@@ -56,6 +57,7 @@ _hidden_pkgs = (
     "utube",
     "mp4_edit",
     "mp4_search",
+    "mp4_merge",
     "thumbnail_gui",
     "md_file",
     "wisdom_hub",

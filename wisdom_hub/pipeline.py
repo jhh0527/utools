@@ -15,5 +15,6 @@ HUB_TABS: tuple[tuple[str, str], ...] = (
     ("7_Utube", "7_utube"),
     ("7_2 mp4Edit", "7_2_mp4Edit"),
     ("7_3 mp4Search", "7_3_mp4Search"),
+    ("7_4 mp4Merge", "7_4_mp4Merge"),
     ("9 MD파일", "9_mdFile"),
 )

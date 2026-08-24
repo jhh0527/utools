@@ -81,6 +81,10 @@ def load_tab_ui(module: str, container: tk.Misc) -> None:
             from mp4_search.gui_app import main
 
             main(container=container)
+        elif module == "7_4_mp4Merge":
+            from mp4_merge.gui_app import main
+
+            main(container=container)
         elif module == "9_mdFile":
             from md_file.gui_app import main
 
